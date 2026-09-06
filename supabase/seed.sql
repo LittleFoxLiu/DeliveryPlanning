@@ -25,6 +25,11 @@ insert into customer_orders (id,customer_name,location,zone,items,delivery_windo
 ('20000000-0000-0000-0000-000000000212','Daniel Ross','103 Hill Street','Central','Baby care · 2 boxes','14:30 – 16:00','Standard',2,'Ready')
 on conflict (id) do update set status=excluded.status,priority=excluded.priority,volume_units=excluded.volume_units;
 
+update customer_orders
+set grid_x=case zone when 'North' then 40 when 'Central' then 27 when 'Harbor' then 43 when 'West' then 10 when 'South' then 24 else 25 end,
+    grid_y=case zone when 'North' then 8 when 'Central' then 24 when 'Harbor' then 35 when 'West' then 27 when 'South' then 43 else 25 end
+where grid_x is null or grid_y is null;
+
 insert into driver_conditions (id,driver_name,availability,current_load,current_position,maximum_load,vehicle) values
 ('30000000-0000-0000-0000-000000000301','Jordan Lee','Available',4,'North depot',12,'Van · RP-18'),
 ('30000000-0000-0000-0000-000000000302','Priya Shah','On route',8,'Central avenue',12,'Van · RP-21'),
