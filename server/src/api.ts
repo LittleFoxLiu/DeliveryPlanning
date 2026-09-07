@@ -18,38 +18,38 @@ export const api = Router();
 
 /* ------------------------------------------------------------------ health */
 api.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString(), llm: config.llm.enabled }));
-api.get('/meta/grid', authenticate(true), (_req, res) => {
+api.get('/meta/grid', authenticate(true), h(async (_req, res) => {
   res.json({
     size: config.grid.size,
-    roads: roads.all().map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status, delay: r.delay_minutes })),
+    roads: (await roads.all()).map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status, delay: r.delay_minutes })),
   });
-});
+}));
 
 /* -------------------------------------------------------------------- auth */
 const authLimiter = rateLimit(config.rateLimit.authMax);
 
-api.post('/auth/signup', authLimiter, h((req, res) => {
+api.post('/auth/signup', authLimiter, h(async (req, res) => {
   const b = asObject(req.body);
   const email = str(b, 'email', { max: 200 }).toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw badRequest('Invalid email');
   const password = str(b, 'password', { min: 8, max: 200 });
   const name = str(b, 'name', { min: 1, max: 120 });
   const role = enumVal(b, 'role', ['merchant', 'customer', 'driver'] as const);
-  if (users.byEmail(email)) throw conflict('Email already registered');
+  if (await users.byEmail(email)) throw conflict('Email already registered');
 
   const { hash, salt } = hashPassword(password);
   let refId: string | null = null;
 
   if (role === 'merchant') {
-    const merchant = merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
+    const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
     const sx = coord(b, 'storeLat');
     const sy = coord(b, 'storeLng');
-    stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: sx, pickupLng: sy });
+    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: sx, pickupLng: sy });
     refId = merchant.id;
   } else if (role === 'customer') {
-    refId = customers.create(name).id;
+    refId = (await customers.create(name)).id;
   } else {
-    const created = drivers.create({
+    const created = await drivers.create({
       name,
       vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
       capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }),
@@ -61,16 +61,16 @@ api.post('/auth/signup', authLimiter, h((req, res) => {
     refId = created.id;
   }
 
-  const row = users.create({ email, passwordHash: hash, passwordSalt: salt, role, name, refId });
+  const row = await users.create({ email, passwordHash: hash, passwordSalt: salt, role, name, refId });
   const user: AuthUser = { id: row.id, email: row.email, role: row.role, name: row.name, refId: row.ref_id };
   res.status(201).json({ token: issueToken(user), user: publicUser(user) });
 }));
 
-api.post('/auth/login', authLimiter, h((req, res) => {
+api.post('/auth/login', authLimiter, h(async (req, res) => {
   const b = asObject(req.body);
   const email = str(b, 'email', { max: 200 });
   const password = str(b, 'password', { max: 200 });
-  const row = users.byEmail(email);
+  const row = await users.byEmail(email);
   if (!row || !verifyPassword(password, row.password_hash, row.password_salt)) {
     throw new HttpError(401, 'invalid_credentials', 'Invalid email or password');
   }
@@ -85,61 +85,61 @@ function publicUser(u: AuthUser) {
 }
 
 /* --------------------------------------------------------------- directory */
-api.get('/directory/merchants', authenticate(true), (_req, res) => {
+api.get('/directory/merchants', authenticate(true), h(async (_req, res) => {
+  const list = await merchants.list();
   res.json({
-    merchants: merchants.list().map((m) => ({
+    merchants: await Promise.all(list.map(async (m) => ({
       id: m.id,
       name: m.name,
-      stores: stores.byMerchant(m.id).map((s) => ({ id: s.id, name: s.name, pickup: { x: s.pickup_lat, y: s.pickup_lng } })),
-    })),
+      stores: (await stores.byMerchant(m.id)).map((s) => ({ id: s.id, name: s.name, pickup: { x: s.pickup_lat, y: s.pickup_lng } })),
+    }))),
   });
-});
+}));
 
 /* ---------------------------------------------------------------- ownership */
-function ownedOrderForMerchant(req: Request, orderId: string) {
-  const order = orders.byId(orderId);
+async function ownedOrderForMerchant(req: Request, orderId: string) {
+  const order = await orders.byId(orderId);
   if (!order) throw notFound('Order not found');
   if (order.merchant_id !== req.user!.refId) throw forbidden('Not your order');
   return order;
 }
-function ownedOrderForCustomer(req: Request, orderId: string) {
-  const order = orders.byId(orderId);
+async function ownedOrderForCustomer(req: Request, orderId: string) {
+  const order = await orders.byId(orderId);
   if (!order) throw notFound('Order not found');
   if (order.customer_id !== req.user!.refId) throw forbidden('Not your order');
   return order;
 }
-function ownedDeliveryForDriver(req: Request, deliveryId: string) {
-  const delivery = deliveries.byId(deliveryId);
+async function ownedDeliveryForDriver(req: Request, deliveryId: string) {
+  const delivery = await deliveries.byId(deliveryId);
   if (!delivery) throw notFound('Delivery not found');
   if (delivery.driver_id !== req.user!.refId) throw forbidden('Not your delivery');
   return delivery;
 }
 
+async function orderWithDelivery(o: Parameters<typeof orderView>[0]) {
+  const d = await deliveries.byOrderId(o.id);
+  return { ...(await orderView(o)), delivery: d ? deliveryView(d) : null };
+}
+
 /* ---------------------------------------------------------------- merchant */
 const merchantOnly = [authenticate(true), requireRole('merchant')];
 
-api.get('/merchant/stores', ...merchantOnly, (req, res) => {
-  res.json({ stores: stores.byMerchant(req.user!.refId!).map((s) => ({ id: s.id, name: s.name, pickup: { x: s.pickup_lat, y: s.pickup_lng } })) });
-});
+api.get('/merchant/stores', ...merchantOnly, h(async (req, res) => {
+  res.json({ stores: (await stores.byMerchant(req.user!.refId!)).map((s) => ({ id: s.id, name: s.name, pickup: { x: s.pickup_lat, y: s.pickup_lng } })) });
+}));
 
-api.get('/merchant/orders', ...merchantOnly, (req, res) => {
-  const list = orders.byMerchant(req.user!.refId!);
-  res.json({
-    orders: list.map((o) => {
-      const d = deliveries.byOrderId(o.id);
-      return { ...orderView(o), delivery: d ? deliveryView(d) : null };
-    }),
-  });
-});
+api.get('/merchant/orders', ...merchantOnly, h(async (req, res) => {
+  const list = await orders.byMerchant(req.user!.refId!);
+  res.json({ orders: await Promise.all(list.map(orderWithDelivery)) });
+}));
 
-api.post('/merchant/orders', ...merchantOnly, h((req, res) => {
+api.post('/merchant/orders', ...merchantOnly, h(async (req, res) => {
   const b = asObject(req.body);
   const storeId = idParam(b.storeId, 'storeId');
-  const store = stores.byId(storeId);
+  const store = await stores.byId(storeId);
   if (!store || store.merchant_id !== req.user!.refId) throw forbidden('Not your store');
-  const customerName = str(b, 'customerName', { min: 1, max: 120 });
-  const customer = customers.create(customerName);
-  const order = orders.create({
+  const customer = await customers.create(str(b, 'customerName', { min: 1, max: 120 }));
+  const order = await orders.create({
     merchant_id: req.user!.refId!,
     store_id: storeId,
     customer_id: customer.id,
@@ -154,49 +154,50 @@ api.post('/merchant/orders', ...merchantOnly, h((req, res) => {
     note: str(b, 'note', { optional: true, max: 280 }) || null,
     items: parseItems(b.items),
   });
-  res.status(201).json({ order: orderView(order) });
+  res.status(201).json({ order: await orderView(order) });
 }));
 
 api.post('/merchant/orders/:id/ready', ...merchantOnly, h(async (req, res) => {
-  const order = ownedOrderForMerchant(req, idParam(req.params.id, 'order id'));
+  const order = await ownedOrderForMerchant(req, idParam(req.params.id, 'order id'));
   if (order.status !== 'created') {
     if (['ready', 'validated', 'dispatching', 'assigned'].includes(order.status)) {
-      return res.json({ order: orderView(orders.byId(order.id)!), note: 'already in dispatch' });
+      return res.json({ order: await orderView((await orders.byId(order.id))!), note: 'already in dispatch' });
     }
     throw conflict(`Order is ${order.status}, cannot mark ready`);
   }
-  orders.setStatus(order.id, 'ready', 'created');
+  await orders.setStatus(order.id, 'ready', 'created');
   const idempotencyKey = req.header('idempotency-key') ?? null;
-  const outcome = coordinator.dispatchOrder(order.id, { idempotencyKey });
+  const outcome = await coordinator.dispatchOrder(order.id, { idempotencyKey });
+  const delivery = await deliveries.byOrderId(order.id);
   res.json({
-    order: orderView(orders.byId(order.id)!),
+    order: await orderView((await orders.byId(order.id))!),
     dispatch: outcome,
-    delivery: deliveries.byOrderId(order.id) ? deliveryView(deliveries.byOrderId(order.id)!) : null,
+    delivery: delivery ? deliveryView(delivery) : null,
   });
 }));
 
-api.get('/merchant/orders/:id', ...merchantOnly, h((req, res) => {
-  const order = ownedOrderForMerchant(req, idParam(req.params.id, 'order id'));
-  const delivery = deliveries.byOrderId(order.id);
-  const driver = delivery?.driver_id ? drivers.byId(delivery.driver_id) : undefined;
+api.get('/merchant/orders/:id', ...merchantOnly, h(async (req, res) => {
+  const order = await ownedOrderForMerchant(req, idParam(req.params.id, 'order id'));
+  const delivery = await deliveries.byOrderId(order.id);
+  const driver = delivery?.driver_id ? await drivers.byId(delivery.driver_id) : undefined;
   res.json({
-    order: orderView(order),
+    order: await orderView(order),
     delivery: delivery ? deliveryView(delivery) : null,
     assignedDriver: driver ? { name: driver.name, vehicleType: driver.vehicle_type, status: driver.status } : null,
-    route: delivery ? activeRouteView(delivery.id) : null,
-    events: listEvents({ orderId: order.id, limit: 60 }),
+    route: delivery ? await activeRouteView(delivery.id) : null,
+    events: await listEvents({ orderId: order.id, limit: 60 }),
   });
 }));
 
 /* ---------------------------------------------------------------- customer */
 const customerOnly = [authenticate(true), requireRole('customer')];
 
-api.post('/customer/orders', ...customerOnly, h((req, res) => {
+api.post('/customer/orders', ...customerOnly, h(async (req, res) => {
   const b = asObject(req.body);
   const storeId = idParam(b.storeId, 'storeId');
-  const store = stores.byId(storeId);
+  const store = await stores.byId(storeId);
   if (!store) throw notFound('Store not found');
-  const order = orders.create({
+  const order = await orders.create({
     merchant_id: store.merchant_id,
     store_id: storeId,
     customer_id: req.user!.refId!,
@@ -211,120 +212,120 @@ api.post('/customer/orders', ...customerOnly, h((req, res) => {
     note: str(b, 'note', { optional: true, max: 280 }) || null,
     items: parseItems(b.items),
   });
-  res.status(201).json({ order: orderView(order) });
+  res.status(201).json({ order: await orderView(order) });
 }));
 
-api.get('/customer/orders', ...customerOnly, (req, res) => {
-  res.json({ orders: orders.byCustomer(req.user!.refId!).map(orderView) });
-});
+api.get('/customer/orders', ...customerOnly, h(async (req, res) => {
+  const list = await orders.byCustomer(req.user!.refId!);
+  res.json({ orders: await Promise.all(list.map(orderView)) });
+}));
 
-api.get('/customer/orders/:id', ...customerOnly, h((req, res) => {
-  const order = ownedOrderForCustomer(req, idParam(req.params.id, 'order id'));
-  res.json(orderTrackingView(order));
+api.get('/customer/orders/:id', ...customerOnly, h(async (req, res) => {
+  const order = await ownedOrderForCustomer(req, idParam(req.params.id, 'order id'));
+  res.json(await orderTrackingView(order));
 }));
 
 /* ------------------------------------------------------------------ driver */
 const driverOnly = [authenticate(true), requireRole('driver')];
 
-api.get('/driver/deliveries', ...driverOnly, (req, res) => {
-  const list = deliveries.byDriver(req.user!.refId!);
+api.get('/driver/deliveries', ...driverOnly, h(async (req, res) => {
+  const list = await deliveries.byDriver(req.user!.refId!);
   res.json({
-    deliveries: list.map((d) => {
-      const o = orders.byId(d.order_id)!;
+    deliveries: await Promise.all(list.map(async (d) => {
+      const o = (await orders.byId(d.order_id))!;
       return {
         ...deliveryView(d),
-        order: { id: o.id, priority: o.priority, packageSize: o.package_size, deadlineTs: o.deadline_ts, items: orders.items(o.id) },
+        order: { id: o.id, priority: o.priority, packageSize: o.package_size, deadlineTs: o.deadline_ts, items: await orders.items(o.id) },
         pickup: { x: o.pickup_lat, y: o.pickup_lng },
         dropoff: { x: o.delivery_lat, y: o.delivery_lng },
-        route: activeRouteView(d.id),
+        route: await activeRouteView(d.id),
       };
-    }),
+    })),
   });
-});
+}));
 
-api.get('/driver/deliveries/:id', ...driverOnly, h((req, res) => {
-  const delivery = ownedDeliveryForDriver(req, idParam(req.params.id, 'delivery id'));
-  const o = orders.byId(delivery.order_id)!;
-  const store = stores.byId(o.store_id);
+api.get('/driver/deliveries/:id', ...driverOnly, h(async (req, res) => {
+  const delivery = await ownedDeliveryForDriver(req, idParam(req.params.id, 'delivery id'));
+  const o = (await orders.byId(delivery.order_id))!;
+  const store = await stores.byId(o.store_id);
   res.json({
     ...deliveryView(delivery),
-    order: { id: o.id, priority: o.priority, packageSize: o.package_size, volume: o.volume, deadlineTs: o.deadline_ts, note: o.note, items: orders.items(o.id) },
+    order: { id: o.id, priority: o.priority, packageSize: o.package_size, volume: o.volume, deadlineTs: o.deadline_ts, note: o.note, items: await orders.items(o.id) },
     pickup: { x: o.pickup_lat, y: o.pickup_lng, name: store?.name ?? 'Merchant' },
     dropoff: { x: o.delivery_lat, y: o.delivery_lng },
-    route: activeRouteView(delivery.id),
+    route: await activeRouteView(delivery.id),
   });
 }));
 
-api.post('/driver/deliveries/:id/accept', ...driverOnly, h((req, res) => {
-  const delivery = ownedDeliveryForDriver(req, idParam(req.params.id, 'delivery id'));
-  const updated = driverProgress(delivery.id, req.user!.refId!, 'accept');
-  res.json({ delivery: deliveryView(updated) });
+api.post('/driver/deliveries/:id/accept', ...driverOnly, h(async (req, res) => {
+  const delivery = await ownedDeliveryForDriver(req, idParam(req.params.id, 'delivery id'));
+  res.json({ delivery: deliveryView(await driverProgress(delivery.id, req.user!.refId!, 'accept')) });
 }));
 
-api.post('/driver/deliveries/:id/status', ...driverOnly, h((req, res) => {
+api.post('/driver/deliveries/:id/status', ...driverOnly, h(async (req, res) => {
   const b = asObject(req.body);
   const action = enumVal(b, 'action', ['picked_up', 'delivered'] as const);
-  const delivery = ownedDeliveryForDriver(req, idParam(req.params.id, 'delivery id'));
-  const updated = driverProgress(delivery.id, req.user!.refId!, action);
-  res.json({ delivery: deliveryView(updated) });
+  const delivery = await ownedDeliveryForDriver(req, idParam(req.params.id, 'delivery id'));
+  res.json({ delivery: deliveryView(await driverProgress(delivery.id, req.user!.refId!, action)) });
 }));
 
-api.post('/driver/status', ...driverOnly, h((req, res) => {
+api.post('/driver/status', ...driverOnly, h(async (req, res) => {
   const b = asObject(req.body);
   const status = enumVal(b, 'status', ['available', 'break', 'offline'] as const);
-  // guard: cannot go offline/break with an accepted, in-hand package
-  const inHand = deliveries.byDriver(req.user!.refId!).some((d) => ['picked_up', 'en_route_drop'].includes(d.status));
+  const inHand = (await deliveries.byDriver(req.user!.refId!)).some((d) => ['picked_up', 'en_route_drop'].includes(d.status));
   if (inHand && status !== 'available') throw conflict('Cannot change status while carrying a package');
-  drivers.setStatus(req.user!.refId!, status);
+  await drivers.setStatus(req.user!.refId!, status);
   res.json({ status });
 }));
 
-api.post('/driver/location', ...driverOnly, h((req, res) => {
+api.post('/driver/location', ...driverOnly, h(async (req, res) => {
   const b = asObject(req.body);
-  drivers.recordLocation(req.user!.refId!, coord(b, 'lat'), coord(b, 'lng'));
+  await drivers.recordLocation(req.user!.refId!, coord(b, 'lat'), coord(b, 'lng'));
   res.json({ ok: true });
 }));
 
 /* --------------------------------------------------------------- admin */
 const adminOnly = [authenticate(true), requireRole('admin')];
 
-api.get('/admin/overview', ...adminOnly, (_req, res) => {
-  const activeOrders = orders.active();
-  const allDrivers = drivers.all();
-  const activeDeliveries = deliveries.active();
+api.get('/admin/overview', ...adminOnly, h(async (_req, res) => {
+  const [activeOrders, allDrivers, activeDeliveries, trafficRows, roadRows, events] = await Promise.all([
+    orders.active(), drivers.all(), deliveries.active(), traffic.all(), roads.all(), listEvents({ limit: 60 }),
+  ]);
+  const assignmentsFlat = (await Promise.all(activeOrders.map((o) => assignmentReasoningView(o.id)))).flat().filter((a) => a.status === 'active');
   res.json({
-    orders: activeOrders.map((o) => ({ ...orderView(o), delivery: deliveries.byOrderId(o.id) ? deliveryView(deliveries.byOrderId(o.id)!) : null })),
+    orders: await Promise.all(activeOrders.map(orderWithDelivery)),
     drivers: allDrivers.map(driverAdminView),
-    deliveries: activeDeliveries.map((d) => ({ ...deliveryView(d), route: activeRouteView(d.id) })),
-    assignments: activeOrders.flatMap((o) => assignmentReasoningView(o.id).filter((a) => a.status === 'active')),
-    traffic: traffic.all(),
-    roadIncidents: roads.all().filter((r) => r.status !== 'clear').map((r) => ({ id: r.id, status: r.status, delay: r.delay_minutes })),
-    events: listEvents({ limit: 60 }),
+    deliveries: await Promise.all(activeDeliveries.map(async (d) => ({ ...deliveryView(d), route: await activeRouteView(d.id) }))),
+    assignments: assignmentsFlat,
+    traffic: trafficRows,
+    roadIncidents: roadRows.filter((r) => r.status !== 'clear').map((r) => ({ id: r.id, status: r.status, delay: r.delay_minutes })),
+    events,
     llmEnabled: config.llm.enabled,
-  });
-});
-
-api.get('/admin/orders', ...adminOnly, (_req, res) => {
-  res.json({ orders: orders.all().map((o) => ({ ...orderView(o), delivery: deliveries.byOrderId(o.id) ? deliveryView(deliveries.byOrderId(o.id)!) : null })) });
-});
-
-api.get('/admin/orders/:id', ...adminOnly, h((req, res) => {
-  const order = orders.byId(idParam(req.params.id, 'order id'));
-  if (!order) throw notFound('Order not found');
-  const delivery = deliveries.byOrderId(order.id);
-  res.json({
-    order: orderView(order),
-    delivery: delivery ? deliveryView(delivery) : null,
-    route: delivery ? activeRouteView(delivery.id) : null,
-    assignments: assignmentReasoningView(order.id),
-    events: listEvents({ orderId: order.id, limit: 200 }),
   });
 }));
 
-api.get('/admin/drivers', ...adminOnly, (_req, res) => res.json({ drivers: drivers.all().map(driverAdminView) }));
-api.get('/admin/events', ...adminOnly, h((req, res) => {
+api.get('/admin/orders', ...adminOnly, h(async (_req, res) => {
+  res.json({ orders: await Promise.all((await orders.all()).map(orderWithDelivery)) });
+}));
+
+api.get('/admin/orders/:id', ...adminOnly, h(async (req, res) => {
+  const order = await orders.byId(idParam(req.params.id, 'order id'));
+  if (!order) throw notFound('Order not found');
+  const delivery = await deliveries.byOrderId(order.id);
+  res.json({
+    order: await orderView(order),
+    delivery: delivery ? deliveryView(delivery) : null,
+    route: delivery ? await activeRouteView(delivery.id) : null,
+    assignments: await assignmentReasoningView(order.id),
+    events: await listEvents({ orderId: order.id, limit: 200 }),
+  });
+}));
+
+api.get('/admin/drivers', ...adminOnly, h(async (_req, res) => res.json({ drivers: (await drivers.all()).map(driverAdminView) })));
+
+api.get('/admin/events', ...adminOnly, h(async (req, res) => {
   const sinceId = req.query.sinceId !== undefined ? int({ sinceId: Number(req.query.sinceId) }, 'sinceId', { min: 0 }) : undefined;
-  res.json({ events: listEvents({ sinceId, limit: 200 }) });
+  res.json({ events: await listEvents({ sinceId, limit: 200 }) });
 }));
 
 api.get('/admin/events/stream', ...adminOnly, (_req, res) => {
@@ -340,11 +341,11 @@ api.get('/admin/events/stream', ...adminOnly, (_req, res) => {
 });
 
 api.post('/admin/dispatch/:orderId', ...adminOnly, h(async (req, res) => {
-  const order = orders.byId(idParam(req.params.orderId, 'order id'));
+  const order = await orders.byId(idParam(req.params.orderId, 'order id'));
   if (!order) throw notFound('Order not found');
   if (['delivered', 'cancelled'].includes(order.status)) throw conflict(`Order is ${order.status}`);
-  if (order.status === 'created') orders.setStatus(order.id, 'ready', 'created');
-  const outcome = coordinator.dispatchOrder(order.id, { idempotencyKey: req.header('idempotency-key') ?? null });
+  if (order.status === 'created') await orders.setStatus(order.id, 'ready', 'created');
+  const outcome = await coordinator.dispatchOrder(order.id, { idempotencyKey: req.header('idempotency-key') ?? null });
   res.json({ outcome });
 }));
 
@@ -357,9 +358,9 @@ const simOnly = [authenticate(true), requireRole('admin')];
 
 api.post('/sim/tick', ...simOnly, h(async (_req, res) => res.json(await simulateTick())));
 
-api.post('/sim/traffic', ...simOnly, h((req, res) => {
+api.post('/sim/traffic', ...simOnly, h(async (req, res) => {
   const b = asObject(req.body);
-  const result = injectTraffic({
+  const result = await injectTraffic({
     segments: Array.isArray(b.segments) ? b.segments.map((s) => idParam(s, 'segment id').toUpperCase()) : undefined,
     status: b.status ? enumVal(b, 'status', ['clear', 'moderate', 'heavy', 'closed'] as const) : undefined,
     delayMinutes: b.delayMinutes !== undefined ? int(b, 'delayMinutes', { min: 0, max: 120 }) : undefined,
@@ -368,16 +369,16 @@ api.post('/sim/traffic', ...simOnly, h((req, res) => {
   res.json(result);
 }));
 
-api.post('/sim/driver/:id/offline', ...simOnly, h((req, res) => {
+api.post('/sim/driver/:id/offline', ...simOnly, h(async (req, res) => {
   const did = idParam(req.params.id, 'driver id');
-  if (!drivers.byId(did)) throw notFound('Driver not found');
-  drivers.setStatus(did, 'offline');
+  if (!(await drivers.byId(did))) throw notFound('Driver not found');
+  await drivers.setStatus(did, 'offline');
   res.json({ ok: true, driverId: did, status: 'offline' });
 }));
 
 api.post('/sim/reset', ...simOnly, h(async (_req, res) => {
   const { seed } = await import('./seed.js');
-  seed({ reset: true });
+  await seed({ reset: true });
   res.json({ ok: true });
 }));
 

@@ -1,7 +1,7 @@
 import { scryptSync, randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { config, type Role } from './config.js';
-import { getDb } from './db.js';
+import { q1 } from './db.js';
 import { unauthorized, forbidden } from './util.js';
 
 export interface AuthUser {
@@ -55,10 +55,9 @@ export function verifyToken(token: string): { sub: string; role: Role } | null {
   }
 }
 
-function loadUser(userId: string): AuthUser | null {
-  const row = getDb()
-    .prepare('SELECT id, email, role, name, ref_id FROM users WHERE id = ?')
-    .get(userId) as { id: string; email: string; role: Role; name: string; ref_id: string | null } | undefined;
+async function loadUser(userId: string): Promise<AuthUser | null> {
+  const row = await q1<{ id: string; email: string; role: Role; name: string; ref_id: string | null }>(
+    'SELECT id, email, role, name, ref_id FROM users WHERE id = ?', [userId]);
   if (!row) return null;
   return { id: row.id, email: row.email, role: row.role, name: row.name, refId: row.ref_id };
 }
@@ -82,10 +81,13 @@ export function authenticate(required: boolean): (req: Request, _res: Response, 
     }
     const decoded = verifyToken(match[1].trim());
     if (!decoded) return next(unauthorized('Invalid or expired token'));
-    const user = loadUser(decoded.sub);
-    if (!user) return next(unauthorized('Account no longer exists'));
-    req.user = user;
-    next();
+    loadUser(decoded.sub)
+      .then((user) => {
+        if (!user) return next(unauthorized('Account no longer exists'));
+        req.user = user;
+        next();
+      })
+      .catch(next);
   };
 }
 

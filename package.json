@@ -9,17 +9,21 @@
     "dev:web": "vite",
     "start": "tsx server/src/index.ts",
     "seed": "tsx server/src/seed.ts --reset",
+    "db:setup": "tsx server/src/seed.ts --reset",
     "build": "tsc -p tsconfig.server.json --noEmit && tsc --noEmit && vite build",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc --noEmit",
     "lint": "tsc -p tsconfig.server.json --noEmit && tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "express": "^5.2.1"
+    "@electric-sql/pglite": "^0.5.8",
+    "express": "^5.2.1",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.0",
+    "@types/pg": "^8.23.1",
     "concurrently": "^9.1.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.0",

@@ -1,6 +1,5 @@
-import { deliveries, orders, drivers, routes, type DeliveryRow, type OrderRow } from '../repo.js';
+import { deliveries, orders, drivers, routes, roads, type DeliveryRow, type OrderRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
-import { roads } from '../repo.js';
 import { calculateRoute, estimateDeliveryTime, type Point } from '../engine/routing.js';
 
 const NAME = 'MonitoringAgent';
@@ -8,11 +7,11 @@ const DELAY_THRESHOLD_MIN = 3;
 const DEVIATION_THRESHOLD = 2.5; // grid units from the planned path
 
 export const monitoringTools = {
-  get_driver_position: (driverId: string) => {
-    const d = drivers.byId(driverId);
+  get_driver_position: async (driverId: string) => {
+    const d = await drivers.byId(driverId);
     return d && d.lat != null ? { lat: d.lat, lng: d.lng as number, at: d.location_at } : undefined;
   },
-  get_order_status: (orderId: string) => orders.byId(orderId)?.status,
+  get_order_status: async (orderId: string) => (await orders.byId(orderId))?.status,
   get_current_route: (deliveryId: string) => routes.activeForDelivery(deliveryId),
   detect_delay: (delivery: DeliveryRow, projectedTotalMin: number, order: OrderRow) => {
     const deadlineMs = Date.parse(order.deadline_ts);
@@ -38,8 +37,8 @@ export const monitoringTools = {
     }
     return { deviating: min > DEVIATION_THRESHOLD, distance: Number(min.toFixed(2)) };
   },
-  estimate_new_eta: (pos: Point, pickup: Point, dropoff: Point, phase: 'to_pickup' | 'to_dropoff') => {
-    const segs = roads.segments();
+  estimate_new_eta: async (pos: Point, pickup: Point, dropoff: Point, phase: 'to_pickup' | 'to_dropoff') => {
+    const segs = await roads.segments();
     if (phase === 'to_dropoff') {
       const r = calculateRoute(pos, dropoff, segs);
       return { totalMinutes: r.etaMinutes, reachable: r.reachable };
@@ -49,8 +48,8 @@ export const monitoringTools = {
   },
   /** Raise a remediation request for the Coordinator to act on. The Monitoring
    *  Agent detects and recommends; it never mutates the assignment itself. */
-  trigger_reassignment: (deliveryId: string, orderId: string, reason: string, cycleId: string) => {
-    emitAgentEvent({
+  trigger_reassignment: async (deliveryId: string, orderId: string, reason: string, cycleId: string) => {
+    await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'reassignment_requested', orderId, deliveryId,
       message: `Monitoring Agent is requesting reassignment for order ${orderId}: ${reason}`,
       data: { reason },
@@ -80,14 +79,14 @@ export const monitoringAgent = {
 
   /** Continuously evaluate every active delivery. Returns findings + a
    *  recommended remediation trigger for the Coordinator to act on. */
-  evaluateActiveDeliveries(cycleId: string): Finding[] {
-    const active = deliveries.active().filter((d) => ['assigned', 'en_route_pickup', 'picked_up', 'en_route_drop'].includes(d.status));
+  async evaluateActiveDeliveries(cycleId: string): Promise<Finding[]> {
+    const active = (await deliveries.active()).filter((d) => ['assigned', 'en_route_pickup', 'picked_up', 'en_route_drop'].includes(d.status));
     const findings: Finding[] = [];
 
     for (const delivery of active) {
-      const order = orders.byId(delivery.order_id);
+      const order = await orders.byId(delivery.order_id);
       if (!order || !delivery.driver_id) continue;
-      const driver = drivers.byId(delivery.driver_id);
+      const driver = await drivers.byId(delivery.driver_id);
       const pos = driver && driver.lat != null ? { x: driver.lat, y: driver.lng as number } : null;
       const phase: Finding['phase'] = ['picked_up', 'en_route_drop'].includes(delivery.status) ? 'to_dropoff' : 'to_pickup';
       const issues: string[] = [];
@@ -101,7 +100,7 @@ export const monitoringAgent = {
           issues, projectedTotalMin: Infinity, slipMin: 9999, missesDeadline: true, deviationDistance: 0,
           recommendedTrigger: trigger,
         });
-        emitAgentEvent({
+        await emitAgentEvent({
           cycleId, agent: NAME, eventType: 'driver_unavailable', orderId: order.id, deliveryId: delivery.id, driverId: delivery.driver_id,
           message: `Driver ${delivery.driver_id} went offline mid-delivery for order ${order.id} — reassignment required`,
         });
@@ -111,11 +110,12 @@ export const monitoringAgent = {
 
       const pickup: Point = { x: order.pickup_lat, y: order.pickup_lng };
       const dropoff: Point = { x: order.delivery_lat, y: order.delivery_lng };
-      const newEta = monitoringTools.estimate_new_eta(pos, pickup, dropoff, phase);
+      const newEta = await monitoringTools.estimate_new_eta(pos, pickup, dropoff, phase);
       const delay = monitoringTools.detect_delay(delivery, newEta.totalMinutes, order);
 
-      const route = monitoringTools.get_current_route(delivery.id);
-      const path: Point[] = route ? (JSON.parse(route.path_json).toPickup ?? []).concat(JSON.parse(route.path_json).toDropoff ?? []) : [];
+      const route = await monitoringTools.get_current_route(delivery.id);
+      const rp = route?.path_json ?? {};
+      const path: Point[] = [...(rp.toPickup ?? []), ...(rp.toDropoff ?? [])];
       const deviation = monitoringTools.detect_route_deviation(pos, path);
 
       if (!newEta.reachable) { issues.push('route_blocked'); trigger = 'reroute'; }
@@ -126,7 +126,7 @@ export const monitoringAgent = {
       if (delay.missesDeadline && (issues.includes('route_blocked') || delay.slipMin > 20)) trigger = 'reassign';
 
       if (issues.length) {
-        emitAgentEvent({
+        await emitAgentEvent({
           cycleId, agent: NAME,
           eventType: delay.missesDeadline ? 'deadline_risk_detected' : 'delay_detected',
           orderId: order.id, deliveryId: delivery.id, driverId: delivery.driver_id,

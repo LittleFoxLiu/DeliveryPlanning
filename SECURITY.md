@@ -42,10 +42,12 @@ and the browser client.
 
 ## Race conditions / idempotency / state
 
-- `assign_order` runs inside a `BEGIN IMMEDIATE` transaction and performs an
-  order-status compare-and-set (`validated|dispatching → assigned`). The second
-  of two concurrent dispatch cycles for the same order fails the CAS and returns
-  "no driver" instead of creating a duplicate assignment.
+- `assign_order` runs inside a transaction whose authoritative gate is an
+  order-status compare-and-set: `UPDATE orders SET status='assigned' WHERE id=$1
+  AND status IN ('validated','dispatching') RETURNING *`. That single statement
+  row-locks; the second of two concurrent dispatch cycles for the same order sees
+  0 rows affected, throws, and rolls back everything it did — no duplicate
+  assignment, route, or driver-count change.
 - `assignments.idempotency_key` is `UNIQUE`; replays with the same
   `Idempotency-Key` return the existing assignment.
 - Order and delivery state transitions are validated against an explicit state
@@ -86,6 +88,6 @@ and the browser client.
 - `/sim/*` endpoints exist for the demo; they are admin-gated but would be
   removed/flagged in a real deployment.
 - Rate-limit and idempotency state is in-process (single node). A multi-node
-  deployment would move both to shared storage; the SQLite transaction guarantees
+  deployment would move both to shared storage; the Postgres transaction guarantees
   still prevent double-assignment per node.
 - Tokens are not revocable before expiry (12 h TTL).

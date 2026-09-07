@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { getDb, qAll } from './db.js';
+import { q } from './db.js';
 
 export interface AgentEvent {
   id: number;
@@ -28,27 +28,20 @@ export interface EmitInput {
 export const bus = new EventEmitter();
 bus.setMaxListeners(50);
 
-export function emitAgentEvent(input: EmitInput): AgentEvent {
-  const db = getDb();
-  const stmt = db.prepare(`
+export async function emitAgentEvent(input: EmitInput): Promise<AgentEvent> {
+  const rows = await q<{ id: number; ts: string }>(`
     INSERT INTO agent_events (cycle_id, agent, event_type, order_id, delivery_id, driver_id, message, data_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    RETURNING id, ts
-  `);
-  const row = stmt.get(
-    input.cycleId ?? null,
-    input.agent,
-    input.eventType,
-    input.orderId ?? null,
-    input.deliveryId ?? null,
-    input.driverId ?? null,
-    input.message,
-    input.data === undefined ? null : JSON.stringify(input.data),
-  ) as { id: number; ts: string };
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+    RETURNING id, ts`,
+    [
+      input.cycleId ?? null, input.agent, input.eventType,
+      input.orderId ?? null, input.deliveryId ?? null, input.driverId ?? null,
+      input.message, input.data === undefined ? null : JSON.stringify(input.data),
+    ]);
 
   const event: AgentEvent = {
-    id: row.id,
-    ts: row.ts,
+    id: rows[0].id,
+    ts: rows[0].ts,
     cycleId: input.cycleId ?? null,
     agent: input.agent,
     eventType: input.eventType,
@@ -58,14 +51,14 @@ export function emitAgentEvent(input: EmitInput): AgentEvent {
     message: input.message,
     data: input.data ?? null,
   };
-  // Never let a listener (e.g. a dead SSE socket) break the caller's transaction.
+  // Never let a listener (e.g. a dead SSE socket) break the caller's flow.
   try { bus.emit('event', event); } catch (err) { console.error('[events] listener error', err); }
   return event;
 }
 
 function mapRow(r: Record<string, unknown>): AgentEvent {
   return {
-    id: r.id as number,
+    id: Number(r.id),
     ts: r.ts as string,
     cycleId: (r.cycle_id as string) ?? null,
     agent: r.agent as string,
@@ -74,11 +67,11 @@ function mapRow(r: Record<string, unknown>): AgentEvent {
     deliveryId: (r.delivery_id as string) ?? null,
     driverId: (r.driver_id as string) ?? null,
     message: r.message as string,
-    data: r.data_json ? JSON.parse(r.data_json as string) : null,
+    data: r.data_json ?? null,
   };
 }
 
-export function listEvents(opts: { sinceId?: number; orderId?: string; limit?: number } = {}): AgentEvent[] {
+export async function listEvents(opts: { sinceId?: number; orderId?: string; limit?: number } = {}): Promise<AgentEvent[]> {
   const clauses: string[] = [];
   const params: unknown[] = [];
   if (opts.sinceId !== undefined) { clauses.push('id > ?'); params.push(opts.sinceId); }
@@ -86,6 +79,6 @@ export function listEvents(opts: { sinceId?: number; orderId?: string; limit?: n
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const limit = Math.min(opts.limit ?? 200, 500);
   params.push(limit);
-  const rows = qAll<Record<string, unknown>>(`SELECT * FROM agent_events ${where} ORDER BY id DESC LIMIT ?`, ...params);
+  const rows = await q<Record<string, unknown>>(`SELECT * FROM agent_events ${where} ORDER BY id DESC LIMIT ?`, params);
   return rows.map(mapRow).reverse();
 }

@@ -18,12 +18,34 @@ and only *orchestrates* — it never invents numbers and never authorises anythi
 
 ```bash
 npm install
-cp .env.example .env          # optional – sensible dev defaults otherwise
 npm run dev                   # API on :8787, web on :5173 (with /api proxy)
 ```
 
-Open http://localhost:5173 and sign in with any seeded account
-(password **`demo1234`**). One-click demo sign-in buttons are on the login screen.
+By default the server runs a **zero-setup in-process Postgres** (PGlite),
+persisted under `server/data/`. Open http://localhost:5173 and sign in with any
+seeded account (password **`demo1234`**). One-click demo sign-in buttons are on
+the login screen.
+
+### Sharing data with your team (Supabase)
+
+To have everyone see the same live data, point the server at a shared Postgres:
+
+1. Create a Supabase project and run [`server/src/schema.ts`](server/src/schema.ts)'s
+   SQL in the SQL editor (or just start the server once — it runs
+   `CREATE TABLE IF NOT EXISTS` on boot).
+2. Supabase dashboard → **Connect** → **URI** tab → copy the connection string
+   and fill in your database password (Settings → Database →
+   *Reset database password* if you don't have it). Use the **Direct** or
+   **Session pooler** connection (port 5432), *not* the transaction pooler (6543).
+3. Put it in `.env.local` (gitignored) as `DATABASE_URL=postgresql://…`.
+4. `npm run db:setup` to create the schema + seed demo data, then `npm run dev`.
+
+Everyone who sets the same `DATABASE_URL` now shares one database. The browser
+never touches Supabase — only the server does, so the connection string stays
+server-side. The service_role / publishable API keys are **not** used.
+
+Tests always run against a private in-process Postgres regardless of
+`DATABASE_URL`.
 
 | Role | Email |
 |------|-------|
@@ -87,7 +109,7 @@ Agent     Agent   Agent   Agent     Agent
             │ engine/  routing (Dijkstra)      │
             │          scoring (multi-factor)  │
             │          stateMachine            │
-            │ repo/    SQLite (node:sqlite)    │
+            │ repo/    Postgres (pg / PGlite)  │
             └──────────────────────────────────┘
 ```
 
@@ -137,9 +159,10 @@ See [SECURITY.md](SECURITY.md). Highlights:
   (merchant ↔ merchant, customer ↔ customer, driver ↔ delivery).
 - All input validated server-side; coordinates bounds-checked; id params
   regex-checked (kills the injection/IDOR probe surface).
-- Assignment is **atomic and idempotent**: an `IMMEDIATE` transaction + an
-  order-status compare-and-set + a unique `idempotency_key`. Concurrent dispatch
-  triggers cannot double-assign (tested with 8 parallel requests).
+- Assignment is **atomic and idempotent**: a transaction gated by an
+  order-status compare-and-set (`UPDATE … WHERE status IN (…)`, which row-locks)
+  + a unique `idempotency_key`. Concurrent dispatch triggers cannot double-assign
+  (tested with 8 parallel requests).
 - State-transition guards; completed/cancelled deliveries can't be reassigned.
 - Parameterised SQL everywhere; per-IP rate limiting (stricter on `/auth`);
   `express.json` body cap; `X-Frame-Options` / `nosniff` / `Referrer-Policy`.
@@ -147,7 +170,7 @@ See [SECURITY.md](SECURITY.md). Highlights:
 
 ---
 
-## Data model (`server/src/db.ts`)
+## Data model (`server/src/schema.ts`)
 
 `users`, `merchants`, `stores`, `customers`, `drivers`, `driver_status`,
 `driver_locations`, `orders`, `order_items`, `deliveries`, `routes`,

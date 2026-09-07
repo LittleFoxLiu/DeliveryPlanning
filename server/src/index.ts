@@ -1,13 +1,12 @@
 import express from 'express';
 import { config } from './config.js';
-import { getDb } from './db.js';
+import { initDb, dbKind } from './db.js';
 import { api } from './api.js';
 import { rateLimit, notFoundHandler, errorHandler } from './http.js';
 import { coordinator } from './agents/coordinator.js';
 import { seed } from './seed.js';
 
 export function createApp() {
-  getDb();
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '128kb' }));
@@ -25,20 +24,25 @@ export function createApp() {
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
-  seed({ reset: process.env.SEED_RESET === '1' });
-  const app = createApp();
-  const server = app.listen(config.port, () => {
-    console.log(`[delivery-planner] API on http://localhost:${config.port}  (llm advisory: ${config.llm.enabled ? 'on' : 'off'})`);
-  });
+  (async () => {
+    await initDb();
+    await seed({ reset: process.env.SEED_RESET === '1' });
+    const app = createApp();
+    const server = app.listen(config.port, () => {
+      console.log(`[delivery-planner] API on http://localhost:${config.port}`);
+      console.log(`[delivery-planner] database: ${dbKind() === 'postgres' ? 'Supabase/Postgres (shared)' : `PGlite (local: ${config.dbFile})`}`);
+      console.log(`[delivery-planner] llm advisory: ${config.llm.enabled ? 'on' : 'off'}`);
+    });
 
-  if (config.monitorIntervalMs > 0) {
-    const loop = setInterval(() => {
-      coordinator.runMonitoringCycle().catch((e) => console.error('[monitor]', e));
-    }, config.monitorIntervalMs);
-    loop.unref();
-    console.log(`[delivery-planner] background monitoring every ${config.monitorIntervalMs}ms`);
-  }
+    if (config.monitorIntervalMs > 0) {
+      const loop = setInterval(() => {
+        coordinator.runMonitoringCycle().catch((e) => console.error('[monitor]', e));
+      }, config.monitorIntervalMs);
+      loop.unref();
+      console.log(`[delivery-planner] background monitoring every ${config.monitorIntervalMs}ms`);
+    }
 
-  process.on('SIGINT', () => { server.close(); process.exit(0); });
-  process.on('SIGTERM', () => { server.close(); process.exit(0); });
+    process.on('SIGINT', () => { server.close(); process.exit(0); });
+    process.on('SIGTERM', () => { server.close(); process.exit(0); });
+  })().catch((e) => { console.error('[delivery-planner] failed to start:', e); process.exit(1); });
 }

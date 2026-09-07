@@ -5,24 +5,27 @@ import { sizeRank, vehicleCanCarry } from './compat.js';
 const NAME = 'DriverAgent';
 
 export const driverTools = {
-  get_available_drivers: (): DriverFull[] => drivers.all().filter((d) => d.status === 'available' || d.status === 'on_route'),
-  get_all_drivers: (): DriverFull[] => drivers.all(),
-  get_driver_location: (driverId: string) => {
-    const d = drivers.byId(driverId);
+  get_available_drivers: async (): Promise<DriverFull[]> => (await drivers.all()).filter((d) => d.status === 'available' || d.status === 'on_route'),
+  get_all_drivers: (): Promise<DriverFull[]> => drivers.all(),
+  get_driver_location: async (driverId: string) => {
+    const d = await drivers.byId(driverId);
     return d && d.lat != null && d.lng != null ? { lat: d.lat, lng: d.lng, at: d.location_at } : undefined;
   },
-  get_driver_status: (driverId: string) => drivers.byId(driverId)?.status,
-  get_driver_capacity: (driverId: string) => {
-    const d = drivers.byId(driverId);
+  get_driver_status: async (driverId: string) => (await drivers.byId(driverId))?.status,
+  get_driver_capacity: async (driverId: string) => {
+    const d = await drivers.byId(driverId);
     return d ? { capacity: d.capacity, used: d.current_order_count, headroom: d.capacity - d.current_order_count } : undefined;
   },
-  get_driver_vehicle: (driverId: string) => {
-    const d = drivers.byId(driverId);
+  get_driver_vehicle: async (driverId: string) => {
+    const d = await drivers.byId(driverId);
     return d ? { vehicleType: d.vehicle_type, maxPackageSize: d.max_package_size } : undefined;
   },
-  get_driver_current_route: (driverId: string) => {
-    const active = deliveries.byDriver(driverId).filter((x) => !['delivered', 'cancelled', 'failed'].includes(x.status));
-    return active.map((dlv) => ({ deliveryId: dlv.id, orderId: dlv.order_id, status: dlv.status, route: dlv.route_id ? routes.activeForDelivery(dlv.id) : null }));
+  get_driver_current_route: async (driverId: string) => {
+    const active = (await deliveries.byDriver(driverId)).filter((x) => !['delivered', 'cancelled', 'failed'].includes(x.status));
+    return Promise.all(active.map(async (dlv) => ({
+      deliveryId: dlv.id, orderId: dlv.order_id, status: dlv.status,
+      route: dlv.route_id ? await routes.activeForDelivery(dlv.id) : null,
+    })));
   },
   update_driver_status: (driverId: string, status: 'available' | 'on_route' | 'break' | 'offline') => drivers.setStatus(driverId, status),
 };
@@ -47,8 +50,8 @@ export const driverAgent = {
    *  location availability, capacity, vehicle compatibility, and current
    *  assignments. Does NOT consider "closest" — that is the Dispatch Agent's
    *  multi-factor decision. */
-  findCandidates(order: OrderRow, cycleId: string, excludeDriverIds: string[] = []): CandidateResult {
-    const all = driverTools.get_all_drivers();
+  async findCandidates(order: OrderRow, cycleId: string, excludeDriverIds: string[] = []): Promise<CandidateResult> {
+    const all = await driverTools.get_all_drivers();
     const candidates: Candidate[] = [];
     const rejected: CandidateResult['rejected'] = [];
 
@@ -63,7 +66,7 @@ export const driverAgent = {
       if (!vehicleCanCarry(d.vehicle_type, d.max_package_size, order.package_size)) {
         reasons.push(`vehicle_${d.vehicle_type}_cannot_carry_${order.package_size}`);
       }
-      const activeForDriver = driverTools.get_driver_current_route(d.id).length;
+      const activeForDriver = (await driverTools.get_driver_current_route(d.id)).length;
       // Soft cap: a driver already juggling >= capacity active legs is skipped.
       if (activeForDriver >= d.capacity) reasons.push('too_many_active_legs');
 
@@ -79,7 +82,7 @@ export const driverAgent = {
       }
     }
 
-    emitAgentEvent({
+    await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'candidates_found', orderId: order.id,
       message: `Found ${candidates.length} eligible driver${candidates.length === 1 ? '' : 's'} `
         + `(${rejected.length} filtered out) for order ${order.id}`,

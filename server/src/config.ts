@@ -1,6 +1,27 @@
 import { randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
+
+// Load .env files for the server (tsx/node don't do this automatically).
+// Skipped under tests, which inject their own env and must never touch a real DB.
+if (process.env.NODE_ENV !== 'test') {
+  for (const file of ['.env', '.env.local']) {
+    if (existsSync(file)) {
+      try { (process as NodeJS.Process & { loadEnvFile: (p: string) => void }).loadEnvFile(file); } catch { /* older node / bad file */ }
+    }
+  }
+}
+
+function resolveDatabaseUrl(): string {
+  const raw = (process.env.DATABASE_URL || process.env.SUPABASE_DB_URL || '').trim();
+  if (!raw) return '';
+  // Ignore unfilled placeholders so a template .env.local doesn't break local dev.
+  if (!/^postgres(ql)?:\/\//i.test(raw) || /YOUR_DB_PASSWORD|\[YOUR-?PASSWORD\]|<password>|:password@/i.test(raw)) {
+    console.warn('[config] DATABASE_URL looks like a placeholder — using local PGlite. Fill in your real Supabase connection string to share data.');
+    return '';
+  }
+  return raw;
+}
 
 function readSecret(): string {
   const fromEnv = process.env.AUTH_SECRET?.trim();
@@ -26,7 +47,10 @@ function readSecret(): string {
 
 export const config = {
   port: Number(process.env.PORT ?? 8787),
-  dbFile: process.env.DB_FILE?.trim() || 'server/data/delivery.db',
+  // When set, the app uses this Postgres (e.g. Supabase) as the shared database.
+  // Otherwise it runs an in-process Postgres (PGlite) persisted to `dbFile`.
+  databaseUrl: resolveDatabaseUrl(),
+  dbFile: process.env.DB_FILE?.trim() || 'server/data/pgdata',
   authSecret: readSecret(),
   tokenTtlSeconds: 60 * 60 * 12,
   // Monitoring loop cadence. 0 disables the background loop (tests / manual mode).

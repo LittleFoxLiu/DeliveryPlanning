@@ -2,7 +2,7 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
 import { seed } from '../src/seed.js';
-import { resetDb } from '../src/db.js';
+import { initDb, resetDb } from '../src/db.js';
 
 export interface TestCtx {
   base: string;
@@ -11,8 +11,9 @@ export interface TestCtx {
 }
 
 export async function startTestServer(): Promise<TestCtx> {
-  resetDb();
-  seed({ reset: true });
+  await initDb();
+  await resetDb();
+  await seed({ reset: true });
   const app = createApp();
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -25,9 +26,9 @@ export async function startTestServer(): Promise<TestCtx> {
   };
 }
 
-export function reseed(): void {
-  resetDb();
-  seed({ reset: true });
+export async function reseed(): Promise<void> {
+  await resetDb();
+  await seed({ reset: true });
 }
 
 export function client(base: string) {

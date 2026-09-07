@@ -11,12 +11,12 @@ export const orderTools = {
   get_order: (orderId: string) => orders.byId(orderId),
   get_merchant: (merchantId: string) => merchants.byId(merchantId),
   get_store: (storeId: string) => stores.byId(storeId),
-  get_delivery_address: (orderId: string) => {
-    const o = orders.byId(orderId);
+  get_delivery_address: async (orderId: string) => {
+    const o = await orders.byId(orderId);
     return o ? { lat: o.delivery_lat, lng: o.delivery_lng } : undefined;
   },
-  get_order_constraints: (orderId: string) => {
-    const o = orders.byId(orderId);
+  get_order_constraints: async (orderId: string) => {
+    const o = await orders.byId(orderId);
     if (!o) return undefined;
     return {
       packageSize: o.package_size,
@@ -27,13 +27,13 @@ export const orderTools = {
       dropoff: { lat: o.delivery_lat, lng: o.delivery_lng },
     };
   },
-  validate_order: (orderId: string) => {
-    const o = orders.byId(orderId);
+  validate_order: async (orderId: string) => {
+    const o = await orders.byId(orderId);
     const issues: string[] = [];
     if (!o) return { ok: false, issues: ['order_not_found'] };
-    const merchant = merchants.byId(o.merchant_id);
-    const store = stores.byId(o.store_id);
-    const customer = customers.byId(o.customer_id);
+    const [merchant, store, customer] = await Promise.all([
+      merchants.byId(o.merchant_id), stores.byId(o.store_id), customers.byId(o.customer_id),
+    ]);
     if (!merchant) issues.push('merchant_missing');
     if (!store) issues.push('store_missing');
     else if (store.merchant_id !== o.merchant_id) issues.push('store_merchant_mismatch');
@@ -58,7 +58,7 @@ export const orderTools = {
 export interface OrderValidation {
   ok: boolean;
   issues: string[];
-  constraints?: ReturnType<typeof orderTools.get_order_constraints>;
+  constraints?: Awaited<ReturnType<typeof orderTools.get_order_constraints>>;
 }
 
 export const orderAgent = {
@@ -67,17 +67,17 @@ export const orderAgent = {
 
   /** Validate order + merchant + pickup/delivery info, derive constraints,
    *  and advance order state to `validated`. */
-  validate(orderId: string, cycleId: string): OrderValidation {
-    const order = orderTools.get_order(orderId);
+  async validate(orderId: string, cycleId: string): Promise<OrderValidation> {
+    const order = await orderTools.get_order(orderId);
     if (!order) {
-      emitAgentEvent({ cycleId, agent: NAME, eventType: 'validation_failed', orderId, message: `Order ${orderId} not found` });
+      await emitAgentEvent({ cycleId, agent: NAME, eventType: 'validation_failed', orderId, message: `Order ${orderId} not found` });
       return { ok: false, issues: ['order_not_found'] };
     }
-    const result = orderTools.validate_order(orderId);
-    const constraints = orderTools.get_order_constraints(orderId);
+    const result = await orderTools.validate_order(orderId);
+    const constraints = await orderTools.get_order_constraints(orderId);
 
     if (!result.ok) {
-      emitAgentEvent({
+      await emitAgentEvent({
         cycleId, agent: NAME, eventType: 'validation_failed', orderId,
         message: `Order ${orderId} failed validation: ${result.issues.join(', ')}`,
         data: { issues: result.issues },
@@ -85,9 +85,9 @@ export const orderAgent = {
       return { ok: false, issues: result.issues, constraints };
     }
 
-    orderTools.update_order_status(orderId, 'validated', ['ready', 'dispatching', 'failed']);
+    await orderTools.update_order_status(orderId, 'validated', ['ready', 'dispatching', 'failed']);
     const deadlineMin = Math.round((Date.parse(order.deadline_ts) - Date.now()) / 60_000);
-    emitAgentEvent({
+    await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'order_validated', orderId,
       message: `Validated order ${orderId} — ${order.priority} priority, ${order.package_size} package, deadline in ${deadlineMin} min`,
       data: { constraints },

@@ -4,7 +4,7 @@ import {
 } from './repo.js';
 import { listEvents } from './events.js';
 
-export function orderView(o: OrderRow) {
+export async function orderView(o: OrderRow) {
   return {
     id: o.id,
     merchantId: o.merchant_id,
@@ -20,7 +20,7 @@ export function orderView(o: OrderRow) {
     dropoff: { x: o.delivery_lat, y: o.delivery_lng },
     createdAt: o.created_at,
     readyAt: o.ready_at,
-    items: orders.items(o.id),
+    items: await orders.items(o.id),
   };
 }
 
@@ -40,8 +40,8 @@ export function deliveryView(d: DeliveryRow) {
   };
 }
 
-export function activeRouteView(deliveryId: string) {
-  const route = routes.activeForDelivery(deliveryId);
+export async function activeRouteView(deliveryId: string) {
+  const route = await routes.activeForDelivery(deliveryId);
   if (!route) return null;
   return {
     id: route.id,
@@ -49,8 +49,8 @@ export function activeRouteView(deliveryId: string) {
     distanceKm: route.distance_km,
     etaMinutes: route.eta_minutes,
     trafficPenaltyMinutes: route.traffic_penalty_minutes,
-    legs: JSON.parse(route.legs_json),
-    path: JSON.parse(route.path_json),
+    legs: route.legs_json,
+    path: route.path_json,
     createdAt: route.created_at,
   };
 }
@@ -79,25 +79,26 @@ export function driverPublicView(d: DriverFull | undefined) {
   };
 }
 
-export function assignmentReasoningView(orderId: string) {
-  const list = assignments.forOrder(orderId);
+export async function assignmentReasoningView(orderId: string) {
+  const list = await assignments.forOrder(orderId);
   return list.map((a) => ({
     id: a.id,
     driverId: a.driver_id,
     status: a.status,
     score: a.score,
     createdAt: a.created_at,
-    reasoning: JSON.parse(a.reasoning_json),
+    reasoning: a.reasoning_json,
   }));
 }
 
-export function orderTrackingView(o: OrderRow) {
-  const delivery = deliveries.byOrderId(o.id);
-  const driver = delivery?.driver_id ? drivers.byId(delivery.driver_id) : undefined;
+export async function orderTrackingView(o: OrderRow) {
+  const delivery = await deliveries.byOrderId(o.id);
+  const driver = delivery?.driver_id ? await drivers.byId(delivery.driver_id) : undefined;
+  const [items, events] = await Promise.all([orders.items(o.id), listEvents({ orderId: o.id, limit: 40 })]);
   return {
     order: {
       id: o.id, status: o.status, priority: o.priority, deadlineTs: o.deadline_ts,
-      dropoff: { x: o.delivery_lat, y: o.delivery_lng }, items: orders.items(o.id),
+      dropoff: { x: o.delivery_lat, y: o.delivery_lng }, items,
     },
     delivery: delivery
       ? {
@@ -111,7 +112,7 @@ export function orderTrackingView(o: OrderRow) {
           ? { x: driver.lat, y: driver.lng } : null,
       }
       : null,
-    events: listEvents({ orderId: o.id, limit: 40 })
+    events: events
       .filter((e) => e.eventType !== 'candidates_evaluated')
       .map((e) => ({ ts: e.ts, agent: e.agent, message: e.message })),
   };
