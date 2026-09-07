@@ -59,8 +59,8 @@ Other scripts: `npm test` (Vitest), `npm run typecheck`, `npm run build`,
    route efficiency, and the rejected candidates).
 4. On the Dispatch screen click **▶ Simulate tick** a couple of times – drivers
    move along their routes.
-5. Click **⚠ Block a route** – a road on the active route is closed and the
-   surrounding streets go heavy.
+5. Click **↻ Randomize road status** – every road segment receives a randomized
+   clear, moderate, heavy, or closed status.
 6. Click **▶ Simulate tick** again – the **Monitoring Agent** detects the delay,
    the **Coordinator** decides to reroute, the **Routing Agent** finds an
    alternative, and the customer-facing ETA updates.

@@ -102,7 +102,30 @@ export async function simulateTick(): Promise<TickResult> {
   return { moved, monitoring };
 }
 
-export interface TrafficChange { closed: string[]; updated: string[] }
+export interface TrafficChange { closed: string[]; updated: string[]; statusCounts?: Record<'clear' | 'moderate' | 'heavy' | 'closed', number> }
+
+/** Simulator: randomize the status of every road segment in Supabase. The
+ * distribution keeps most roads usable while still producing meaningful
+ * congestion and closure scenarios for the monitoring demo. */
+export async function randomizeRoadStatus(): Promise<TrafficChange> {
+  const current = await roads.all();
+  const statusCounts: Record<'clear' | 'moderate' | 'heavy' | 'closed', number> = { clear: 0, moderate: 0, heavy: 0, closed: 0 };
+  const randomized = current.map((road) => {
+    const roll = Math.random();
+    const status = roll < 0.55 ? 'clear' : roll < 0.8 ? 'moderate' : roll < 0.95 ? 'heavy' : 'closed';
+    const delay = status === 'clear' ? 0 : status === 'moderate' ? 3 + Math.floor(Math.random() * 6) : status === 'heavy' ? 8 + Math.floor(Math.random() * 13) : 0;
+    statusCounts[status] += 1;
+    return { id: road.id, ax: road.ax, ay: road.ay, bx: road.bx, by: road.by, status, delay };
+  });
+  await roads.upsertMany(randomized);
+  const closed = randomized.filter((road) => road.status === 'closed').map((road) => road.id);
+  await emitAgentEvent({
+    agent: 'TrafficFeed', eventType: 'traffic_randomized',
+    message: `Randomized road status across ${randomized.length} segment(s): ${statusCounts.clear} clear, ${statusCounts.moderate} moderate, ${statusCounts.heavy} heavy, ${statusCounts.closed} closed`,
+    data: { statusCounts, closed },
+  });
+  return { closed, updated: randomized.map((road) => road.id), statusCounts };
+}
 
 /** Simulator: inject a road/traffic change. Either explicit segments or
  *  `blockRouteOf` (closes a segment on that order's remaining route). */

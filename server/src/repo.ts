@@ -153,8 +153,8 @@ export const roads = {
   async all() { return select<RoadRow>('road_segments', {}, { order: 'id.asc' }); },
   async segments(): Promise<Segment[]> { return (await roads.all()).map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status, delay_minutes: r.delay_minutes })); },
   async byId(rid: string) { return first<RoadRow>('road_segments', { id: `eq.${rid}` }); },
-  async upsert(r: { id: string; ax: number; ay: number; bx: number; by: number; status?: RoadRow['status']; delay?: number }) { await upsert('road_segments', { id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status ?? 'clear', delay_minutes: r.delay ?? 0 }, 'id'); },
-  async upsertMany(rows: { id: string; ax: number; ay: number; bx: number; by: number; status?: RoadRow['status']; delay?: number }[]) { await upsertMany('road_segments', rows.map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status ?? 'clear', delay_minutes: r.delay ?? 0 })), 'id'); },
+  async upsert(r: { id: string; ax: number; ay: number; bx: number; by: number; status?: RoadRow['status']; delay?: number }) { await upsert('road_segments', { id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status ?? 'clear', delay_minutes: r.delay ?? 0, updated_at: nowIso() }, 'id'); },
+  async upsertMany(rows: { id: string; ax: number; ay: number; bx: number; by: number; status?: RoadRow['status']; delay?: number }[]) { await upsertMany('road_segments', rows.map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status ?? 'clear', delay_minutes: r.delay ?? 0, updated_at: nowIso() })), 'id'); },
   async setStatus(rid: string, status: RoadRow['status'], delay: number) { await update('road_segments', { id: `eq.${rid}` }, { status, delay_minutes: delay, updated_at: nowIso() }); },
 };
 

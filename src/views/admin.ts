@@ -26,11 +26,14 @@ let expanded = new Set<string>();
 
 export async function renderAdmin(el: HTMLElement): Promise<void> {
   resetSig('admin');
-  try { grid = await get('/meta/grid'); } catch { /* retry next poll */ }
   const draw = async () => {
     try {
-      const ov = await get<Overview>('/admin/overview');
-      if (!changed('admin', { ov, expanded: [...expanded] })) return;
+      const [ov, nextGrid] = await Promise.all([
+        get<Overview>('/admin/overview'),
+        get<{ size: number; roads: RoadSeg[] }>('/meta/grid'),
+      ]);
+      grid = nextGrid;
+      if (!changed('admin', { ov, grid, expanded: [...expanded] })) return;
       if (patchView(el, view(ov))) wire(el, ov); else resetSig('admin');
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) handleUnauthed();
@@ -151,16 +154,15 @@ function wire(el: HTMLElement, ov: Overview): void {
   el.querySelectorAll<HTMLButtonElement>('[data-offline]').forEach((b) => b.addEventListener('click', () =>
     act(() => post(`/sim/driver/${b.dataset.offline}/offline`), 'Driver taken offline — watch the Monitoring Agent')));
 
-  const firstAssigned = ov.orders.find((o) => o.delivery?.driverId && ['assigned', 'picked_up'].includes(o.delivery.status));
   const head = el.querySelector('.page-head .pill-row');
-  if (firstAssigned && head && !head.querySelector('[data-act="traffic"]')) {
+  if (head && !head.querySelector('[data-act="traffic"]')) {
     const btn = document.createElement('button');
     btn.className = 'btn';
     btn.dataset.act = 'traffic';
-    btn.textContent = '⚠ Block a route';
+    btn.textContent = '↻ Randomize road status';
     btn.addEventListener('click', () => act(
-      () => post('/sim/traffic', { blockRouteOf: firstAssigned.id }),
-      'Road closed on the active route — watch the agents recover'));
+      () => post('/sim/traffic/randomize'),
+      'Road statuses randomized — run monitoring or simulate a tick to recalculate routes'));
     head.insertBefore(btn, head.children[1]);
   }
 }

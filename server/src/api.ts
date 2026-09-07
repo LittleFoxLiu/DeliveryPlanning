@@ -9,7 +9,7 @@ import {
 } from './repo.js';
 import { listEvents, bus } from './events.js';
 import { coordinator } from './agents/coordinator.js';
-import { driverProgress, simulateTick, injectTraffic } from './services.js';
+import { driverProgress, simulateTick, injectTraffic, randomizeRoadStatus } from './services.js';
 import {
   orderView, deliveryView, activeRouteView, driverAdminView, assignmentReasoningView, orderTrackingView,
 } from './dto.js';
@@ -356,6 +356,10 @@ api.post('/admin/monitor/tick', ...adminOnly, h(async (_req, res) => {
 const simOnly = [authenticate(true), requireRole('admin')];
 
 api.post('/sim/tick', ...simOnly, h(async (_req, res) => res.json(await simulateTick())));
+
+api.post('/sim/traffic/randomize', ...simOnly, h(async (_req, res) => {
+  res.json(await randomizeRoadStatus());
+}));
 
 api.post('/sim/traffic', ...simOnly, h(async (req, res) => {
   const b = asObject(req.body);
