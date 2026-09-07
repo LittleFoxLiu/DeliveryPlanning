@@ -15,8 +15,8 @@ export function toast(message: string, kind: 'ok' | 'error' = 'ok'): void {
   window.setTimeout(() => { el!.className = 'toast'; }, 3200);
 }
 
-/** SQLite `datetime()` returns "YYYY-MM-DD HH:MM:SS" in UTC with no zone marker.
- *  Normalise so the browser parses it as UTC, not local time. */
+/** Normalize API timestamps. ISO values carry their timezone; timestamps
+ * without one are treated as UTC for backward-compatible display. */
 function parseTs(ts: string | null | undefined): number {
   if (!ts) return NaN;
   const s = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(ts) ? ts.replace(' ', 'T') + 'Z' : ts;

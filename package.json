@@ -3,6 +3,9 @@
   "private": true,
   "version": "3.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "scripts": {
     "dev": "concurrently -k -n api,web -c green,cyan \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "tsx watch server/src/index.ts",

@@ -86,6 +86,7 @@ and the browser client.
 - `/sim/*` endpoints exist for the demo; they are admin-gated but would be
   removed/flagged in a real deployment.
 - Rate-limit and idempotency state is in-process (single node). A multi-node
-  deployment would move both to shared storage; the SQLite transaction guarantees
+  deployment uses Supabase shared storage; critical multi-step workflows should
+  be moved into Supabase RPC functions for strict transaction guarantees
   still prevent double-assignment per node.
 - Tokens are not revocable before expiry (12 h TTL).

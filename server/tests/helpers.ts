@@ -11,8 +11,8 @@ export interface TestCtx {
 }
 
 export async function startTestServer(): Promise<TestCtx> {
-  resetDb();
-  seed({ reset: true });
+  await resetDb();
+  await seed({ reset: true });
   const app = createApp();
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -25,9 +25,9 @@ export async function startTestServer(): Promise<TestCtx> {
   };
 }
 
-export function reseed(): void {
-  resetDb();
-  seed({ reset: true });
+export async function reseed(): Promise<void> {
+  await resetDb();
+  await seed({ reset: true });
 }
 
 export function client(base: string) {

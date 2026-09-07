@@ -7,7 +7,7 @@ let c: ReturnType<typeof client>;
 
 beforeAll(async () => { ctx = await startTestServer(); c = client(ctx.base); });
 afterAll(async () => { await ctx.close(); });
-beforeEach(() => reseed());
+beforeEach(async () => { await reseed(); });
 
 async function firstCreatedOrder(token: string): Promise<string> {
   const res = await c.get('/merchant/orders', token);

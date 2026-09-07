@@ -22,6 +22,13 @@ cp .env.example .env          # optional – sensible dev defaults otherwise
 npm run dev                   # API on :8787, web on :5173 (with /api proxy)
 ```
 
+The backend stores application data in Supabase. Run `supabase/schema.sql` in
+the Supabase SQL Editor first, then set `SUPABASE_URL` and the server-only
+`SUPABASE_SERVICE_ROLE_KEY` in `.env`. Finally run `npm run seed` from this
+directory. The server seed creates the demo domain data and the custom scrypt
+login users; `supabase/seed.sql` is available for SQL-only domain-data setup,
+but it intentionally does not contain password hashes.
+
 Open http://localhost:5173 and sign in with any seeded account
 (password **`demo1234`**). One-click demo sign-in buttons are on the login screen.
 
@@ -87,7 +94,7 @@ Agent     Agent   Agent   Agent     Agent
             │ engine/  routing (Dijkstra)      │
             │          scoring (multi-factor)  │
             │          stateMachine            │
-            │ repo/    SQLite (node:sqlite)    │
+            │ repo/    Supabase PostgREST       │
             └──────────────────────────────────┘
 ```
 

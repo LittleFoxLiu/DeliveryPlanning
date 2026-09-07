@@ -4,7 +4,6 @@ export default defineConfig({
   test: {
     include: ['server/tests/**/*.test.ts'],
     env: {
-      DB_FILE: ':memory:',
       NODE_ENV: 'test',
       AUTH_SECRET: 'test-secret-0123456789abcdef',
       MONITOR_INTERVAL_MS: '0',

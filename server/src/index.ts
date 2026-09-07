@@ -1,4 +1,6 @@
 import express from 'express';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
 import { getDb } from './db.js';
 import { api } from './api.js';
@@ -7,7 +9,6 @@ import { coordinator } from './agents/coordinator.js';
 import { seed } from './seed.js';
 
 export function createApp() {
-  getDb();
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '128kb' }));
@@ -23,12 +24,17 @@ export function createApp() {
   return app;
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+// `process.argv[1]` is a Windows filesystem path, while import.meta.url is a
+// file URL. Comparing the raw strings makes the server silently skip startup
+// on Windows.
+const entryPath = process.argv[1];
+const isMain = !!entryPath && fileURLToPath(import.meta.url) === resolve(entryPath);
 if (isMain) {
-  seed({ reset: process.env.SEED_RESET === '1' });
+  await getDb();
+  await seed({ reset: process.env.SEED_RESET === '1' });
   const app = createApp();
-  const server = app.listen(config.port, () => {
-    console.log(`[delivery-planner] API on http://localhost:${config.port}  (llm advisory: ${config.llm.enabled ? 'on' : 'off'})`);
+  const server = app.listen(config.port, config.host, () => {
+    console.log(`[delivery-planner] API on http://${config.host}:${config.port}  (llm advisory: ${config.llm.enabled ? 'on' : 'off'})`);
   });
 
   if (config.monitorIntervalMs > 0) {

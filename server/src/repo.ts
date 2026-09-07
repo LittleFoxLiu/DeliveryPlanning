@@ -1,104 +1,68 @@
-import type { DatabaseSync } from 'node:sqlite';
-import { getDb, qRun } from './db.js';
+import { first, insert, insertMany, select, update, upsert, upsertMany } from './db.js';
 import { id, nowIso } from './util.js';
 import { assertOrderTransition, assertDeliveryTransition, type OrderStatus, type DeliveryStatus } from './engine/stateMachine.js';
 import type { Segment } from './engine/routing.js';
 
-const db = (): DatabaseSync => getDb();
-
-/* ------------------------------------------------------------------ users */
 export interface UserRow { id: string; email: string; role: 'admin' | 'merchant' | 'driver' | 'customer'; name: string; ref_id: string | null }
+type UserDbRow = UserRow & { password_hash: string; password_salt: string };
 
 export const users = {
-  create(input: { email: string; passwordHash: string; passwordSalt: string; role: UserRow['role']; name: string; refId: string | null }): UserRow {
-    const uid = id('usr');
-    db().prepare(`INSERT INTO users (id, email, password_hash, password_salt, role, name, ref_id) VALUES (?,?,?,?,?,?,?)`)
-      .run(uid, input.email.toLowerCase(), input.passwordHash, input.passwordSalt, input.role, input.name, input.refId);
-    return { id: uid, email: input.email.toLowerCase(), role: input.role, name: input.name, ref_id: input.refId };
+  async create(input: { email: string; passwordHash: string; passwordSalt: string; role: UserRow['role']; name: string; refId: string | null }): Promise<UserRow> {
+    const email = input.email.trim().toLowerCase();
+    return insert<UserRow>('users', { id: id('usr'), email, password_hash: input.passwordHash, password_salt: input.passwordSalt, role: input.role, name: input.name, ref_id: input.refId });
   },
-  byEmail(email: string): (UserRow & { password_hash: string; password_salt: string }) | undefined {
-    return db().prepare(`SELECT * FROM users WHERE email = ?`).get(email.toLowerCase()) as never;
-  },
-  byId(uid: string): UserRow | undefined {
-    return db().prepare(`SELECT id, email, role, name, ref_id FROM users WHERE id = ?`).get(uid) as never;
-  },
+  async byEmail(email: string): Promise<UserDbRow | undefined> { return first<UserDbRow>('users', { email: `eq.${email.trim().toLowerCase()}` }); },
+  async byId(uid: string): Promise<UserRow | undefined> { return first<UserRow>('users', { id: `eq.${uid}` }); },
 };
 
-/* -------------------------------------------------------------- merchants */
 export const merchants = {
-  create(name: string): { id: string; name: string } {
-    const mid = id('mch');
-    db().prepare(`INSERT INTO merchants (id, name) VALUES (?, ?)`).run(mid, name);
-    return { id: mid, name };
-  },
-  byId(mid: string) { return db().prepare(`SELECT * FROM merchants WHERE id = ?`).get(mid) as { id: string; name: string } | undefined; },
-  list() { return db().prepare(`SELECT * FROM merchants ORDER BY name`).all() as { id: string; name: string }[]; },
+  async create(name: string): Promise<{ id: string; name: string }> { return insert('merchants', { id: id('mch'), name }); },
+  async byId(mid: string) { return first<{ id: string; name: string }>('merchants', { id: `eq.${mid}` }); },
+  async list() { return select<{ id: string; name: string }>('merchants', {}, { order: 'name.asc' }); },
 };
 
-export const stores = {
-  create(input: { merchantId: string; name: string; pickupLat: number; pickupLng: number }) {
-    const sid = id('sto');
-    db().prepare(`INSERT INTO stores (id, merchant_id, name, pickup_lat, pickup_lng) VALUES (?,?,?,?,?)`)
-      .run(sid, input.merchantId, input.name, input.pickupLat, input.pickupLng);
-    return { id: sid, ...input };
-  },
-  byId(sid: string) { return db().prepare(`SELECT * FROM stores WHERE id = ?`).get(sid) as unknown as StoreRow | undefined; },
-  byMerchant(mid: string) { return db().prepare(`SELECT * FROM stores WHERE merchant_id = ? ORDER BY name`).all(mid) as unknown as StoreRow[]; },
-};
 export interface StoreRow { id: string; merchant_id: string; name: string; pickup_lat: number; pickup_lng: number }
+export const stores = {
+  async create(input: { merchantId: string; name: string; pickupLat: number; pickupLng: number }) {
+    return insert<StoreRow>('stores', { id: id('sto'), merchant_id: input.merchantId, name: input.name, pickup_lat: input.pickupLat, pickup_lng: input.pickupLng });
+  },
+  async byId(sid: string) { return first<StoreRow>('stores', { id: `eq.${sid}` }); },
+  async byMerchant(mid: string) { return select<StoreRow>('stores', { merchant_id: `eq.${mid}` }, { order: 'name.asc' }); },
+};
 
 export const customers = {
-  create(name: string) { const cid = id('cus'); db().prepare(`INSERT INTO customers (id, name) VALUES (?, ?)`).run(cid, name); return { id: cid, name }; },
-  byId(cid: string) { return db().prepare(`SELECT * FROM customers WHERE id = ?`).get(cid) as { id: string; name: string } | undefined; },
+  async create(name: string) { return insert<{ id: string; name: string }>('customers', { id: id('cus'), name }); },
+  async byId(cid: string) { return first<{ id: string; name: string }>('customers', { id: `eq.${cid}` }); },
 };
 
-/* ---------------------------------------------------------------- drivers */
 export interface DriverRow { id: string; name: string; vehicle_type: 'bike' | 'car' | 'van' | 'truck'; capacity: number; max_package_size: 'small' | 'medium' | 'large' }
-export interface DriverFull extends DriverRow {
-  status: DeliveryStatusForDriver; current_order_count: number; lat: number | null; lng: number | null; location_at: string | null;
-}
+export interface DriverFull extends DriverRow { status: DeliveryStatusForDriver; current_order_count: number; lat: number | null; lng: number | null; location_at: string | null }
 type DeliveryStatusForDriver = 'available' | 'on_route' | 'break' | 'offline';
 
+async function driverView(d: DriverRow): Promise<DriverFull> {
+  const status = await first<{ status: DeliveryStatusForDriver; current_order_count: number }>('driver_status', { driver_id: `eq.${d.id}` });
+  const location = await first<{ lat: number; lng: number; recorded_at: string }>('driver_locations', { driver_id: `eq.${d.id}` }, { order: 'id.desc' });
+  return { ...d, status: status?.status ?? 'offline', current_order_count: status?.current_order_count ?? 0, lat: location?.lat ?? null, lng: location?.lng ?? null, location_at: location?.recorded_at ?? null };
+}
+
 export const drivers = {
-  create(input: { name: string; vehicleType: DriverRow['vehicle_type']; capacity: number; maxPackageSize: DriverRow['max_package_size']; lat: number; lng: number; status?: DeliveryStatusForDriver }) {
+  async create(input: { name: string; vehicleType: DriverRow['vehicle_type']; capacity: number; maxPackageSize: DriverRow['max_package_size']; lat: number; lng: number; status?: DeliveryStatusForDriver }) {
     const did = id('drv');
-    db().prepare(`INSERT INTO drivers (id, name, vehicle_type, capacity, max_package_size) VALUES (?,?,?,?,?)`)
-      .run(did, input.name, input.vehicleType, input.capacity, input.maxPackageSize);
-    db().prepare(`INSERT INTO driver_status (driver_id, status, current_order_count) VALUES (?, ?, 0)`).run(did, input.status ?? 'available');
-    db().prepare(`INSERT INTO driver_locations (driver_id, lat, lng) VALUES (?, ?, ?)`).run(did, input.lat, input.lng);
+    await insert('drivers', { id: did, name: input.name, vehicle_type: input.vehicleType, capacity: input.capacity, max_package_size: input.maxPackageSize });
+    await insert('driver_status', { driver_id: did, status: input.status ?? 'available', current_order_count: 0 });
+    await insert('driver_locations', { driver_id: did, lat: input.lat, lng: input.lng });
     return { id: did };
   },
-  byId(did: string): DriverFull | undefined {
-    return db().prepare(`
-      SELECT d.*, s.status, s.current_order_count,
-             (SELECT lat FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1) AS lat,
-             (SELECT lng FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1) AS lng,
-             (SELECT recorded_at FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1) AS location_at
-      FROM drivers d JOIN driver_status s ON s.driver_id = d.id WHERE d.id = ?
-    `).get(did) as never;
+  async byId(did: string): Promise<DriverFull | undefined> { const d = await first<DriverRow>('drivers', { id: `eq.${did}` }); return d ? driverView(d) : undefined; },
+  async all(): Promise<DriverFull[]> { const rows = await select<DriverRow>('drivers', {}, { order: 'name.asc' }); return Promise.all(rows.map(driverView)); },
+  async setStatus(did: string, status: DeliveryStatusForDriver) { await update('driver_status', { driver_id: `eq.${did}` }, { status, updated_at: nowIso() }); },
+  async adjustOrderCount(did: string, delta: number) {
+    const current = await first<{ current_order_count: number }>('driver_status', { driver_id: `eq.${did}` });
+    await update('driver_status', { driver_id: `eq.${did}` }, { current_order_count: Math.max(0, (current?.current_order_count ?? 0) + delta), updated_at: nowIso() });
   },
-  all(): DriverFull[] {
-    return db().prepare(`
-      SELECT d.*, s.status, s.current_order_count,
-             (SELECT lat FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1) AS lat,
-             (SELECT lng FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1) AS lng,
-             (SELECT recorded_at FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1) AS location_at
-      FROM drivers d JOIN driver_status s ON s.driver_id = d.id ORDER BY d.name
-    `).all() as never;
-  },
-  setStatus(did: string, status: DeliveryStatusForDriver) {
-    db().prepare(`UPDATE driver_status SET status = ?, updated_at = ? WHERE driver_id = ?`).run(status, nowIso(), did);
-  },
-  adjustOrderCount(did: string, delta: number) {
-    db().prepare(`UPDATE driver_status SET current_order_count = MAX(0, current_order_count + ?), updated_at = ? WHERE driver_id = ?`)
-      .run(delta, nowIso(), did);
-  },
-  recordLocation(did: string, lat: number, lng: number) {
-    db().prepare(`INSERT INTO driver_locations (driver_id, lat, lng) VALUES (?, ?, ?)`).run(did, lat, lng);
-  },
+  async recordLocation(did: string, lat: number, lng: number) { await insert('driver_locations', { driver_id: did, lat, lng }); },
 };
 
-/* ----------------------------------------------------------------- orders */
 export interface OrderRow {
   id: string; merchant_id: string; store_id: string; customer_id: string;
   pickup_lat: number; pickup_lng: number; delivery_lat: number; delivery_lng: number;
@@ -108,44 +72,27 @@ export interface OrderRow {
 }
 
 export const orders = {
-  create(input: Omit<OrderRow, 'id' | 'status' | 'created_at' | 'ready_at'> & { items?: { name: string; qty: number }[] }): OrderRow {
+  async create(input: Omit<OrderRow, 'id' | 'status' | 'created_at' | 'ready_at'> & { items?: { name: string; qty: number }[] }): Promise<OrderRow> {
     const oid = id('ord');
-    db().prepare(`
-      INSERT INTO orders (id, merchant_id, store_id, customer_id, pickup_lat, pickup_lng, delivery_lat, delivery_lng, status, priority, deadline_ts, package_size, volume, note)
-      VALUES (?,?,?,?,?,?,?,?, 'created', ?,?,?,?,?)
-    `).run(oid, input.merchant_id, input.store_id, input.customer_id, input.pickup_lat, input.pickup_lng,
-      input.delivery_lat, input.delivery_lng, input.priority, input.deadline_ts, input.package_size, input.volume, input.note ?? null);
-    for (const item of input.items ?? []) {
-      db().prepare(`INSERT INTO order_items (order_id, name, qty) VALUES (?, ?, ?)`).run(oid, item.name, item.qty);
-    }
-    return orders.byId(oid)!;
+    await insert('orders', { id: oid, merchant_id: input.merchant_id, store_id: input.store_id, customer_id: input.customer_id, pickup_lat: input.pickup_lat, pickup_lng: input.pickup_lng, delivery_lat: input.delivery_lat, delivery_lng: input.delivery_lng, status: 'created', priority: input.priority, deadline_ts: input.deadline_ts, package_size: input.package_size, volume: input.volume, note: input.note ?? null });
+    if (input.items?.length) await insertMany('order_items', input.items.map((item) => ({ order_id: oid, name: item.name, qty: item.qty })));
+    return (await orders.byId(oid))!;
   },
-  byId(oid: string): OrderRow | undefined { return db().prepare(`SELECT * FROM orders WHERE id = ?`).get(oid) as never; },
-  items(oid: string) { return db().prepare(`SELECT name, qty FROM order_items WHERE order_id = ?`).all(oid) as { name: string; qty: number }[]; },
-  byMerchant(mid: string) { return db().prepare(`SELECT * FROM orders WHERE merchant_id = ? ORDER BY created_at DESC`).all(mid) as unknown as OrderRow[]; },
-  byCustomer(cid: string) { return db().prepare(`SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC`).all(cid) as unknown as OrderRow[]; },
-  all() { return db().prepare(`SELECT * FROM orders ORDER BY created_at DESC`).all() as unknown as OrderRow[]; },
-  active() {
-    return db().prepare(`SELECT * FROM orders WHERE status NOT IN ('delivered','cancelled','failed') ORDER BY created_at DESC`).all() as unknown as OrderRow[];
-  },
-  /** Guarded state transition. Pass expectedFrom to make it a compare-and-set. */
-  setStatus(oid: string, to: OrderStatus, expectedFrom?: OrderStatus | OrderStatus[]): OrderRow {
-    const current = orders.byId(oid);
-    if (!current) throw new Error('order not found');
-    if (expectedFrom) {
-      const allowed = Array.isArray(expectedFrom) ? expectedFrom : [expectedFrom];
-      if (!allowed.includes(current.status)) {
-        throw new Error(`order ${oid} expected ${allowed.join('/')} but was ${current.status}`);
-      }
-    }
+  async byId(oid: string) { return first<OrderRow>('orders', { id: `eq.${oid}` }); },
+  async items(oid: string) { return select<{ name: string; qty: number }>('order_items', { order_id: `eq.${oid}` }, { select: 'name,qty', order: 'id.asc' }); },
+  async byMerchant(mid: string) { return select<OrderRow>('orders', { merchant_id: `eq.${mid}` }, { order: 'created_at.desc' }); },
+  async byCustomer(cid: string) { return select<OrderRow>('orders', { customer_id: `eq.${cid}` }, { order: 'created_at.desc' }); },
+  async all() { return select<OrderRow>('orders', {}, { order: 'created_at.desc' }); },
+  async active() { return select<OrderRow>('orders', { status: 'not.in.(delivered,cancelled,failed)' }, { order: 'created_at.desc' }); },
+  async setStatus(oid: string, to: OrderStatus, expectedFrom?: OrderStatus | OrderStatus[]): Promise<OrderRow> {
+    const current = await orders.byId(oid); if (!current) throw new Error('order not found');
+    if (expectedFrom) { const allowed = Array.isArray(expectedFrom) ? expectedFrom : [expectedFrom]; if (!allowed.includes(current.status)) throw new Error(`order ${oid} expected ${allowed.join('/')} but was ${current.status}`); }
     assertOrderTransition(current.status, to);
-    const readyAt = to === 'ready' && !current.ready_at ? nowIso() : current.ready_at;
-    db().prepare(`UPDATE orders SET status = ?, ready_at = ? WHERE id = ?`).run(to, readyAt, oid);
-    return orders.byId(oid)!;
+    await update('orders', { id: `eq.${oid}` }, { status: to, ready_at: to === 'ready' && !current.ready_at ? nowIso() : current.ready_at });
+    return (await orders.byId(oid))!;
   },
 };
 
-/* ------------------------------------------------------------- deliveries */
 export interface DeliveryRow {
   id: string; order_id: string; driver_id: string | null; status: DeliveryStatus;
   assigned_at: string | null; pickup_at: string | null; delivered_at: string | null;
@@ -154,116 +101,64 @@ export interface DeliveryRow {
 }
 
 export const deliveries = {
-  byOrderId(oid: string): DeliveryRow | undefined { return db().prepare(`SELECT * FROM deliveries WHERE order_id = ?`).get(oid) as never; },
-  byId(dsid: string): DeliveryRow | undefined { return db().prepare(`SELECT * FROM deliveries WHERE id = ?`).get(dsid) as never; },
-  byDriver(did: string) { return db().prepare(`SELECT * FROM deliveries WHERE driver_id = ? ORDER BY created_at DESC`).all(did) as unknown as DeliveryRow[]; },
-  active() {
-    return db().prepare(`SELECT * FROM deliveries WHERE status NOT IN ('delivered','cancelled','failed')`).all() as unknown as DeliveryRow[];
-  },
-  all() { return db().prepare(`SELECT * FROM deliveries ORDER BY created_at DESC`).all() as unknown as DeliveryRow[]; },
-  ensure(oid: string): DeliveryRow {
-    const existing = deliveries.byOrderId(oid);
-    if (existing) return existing;
-    const dsid = id('dlv');
-    db().prepare(`INSERT INTO deliveries (id, order_id, status) VALUES (?, ?, 'pending')`).run(dsid, oid);
-    return deliveries.byId(dsid)!;
-  },
-  update(dsid: string, patch: Partial<Pick<DeliveryRow, 'driver_id' | 'assigned_at' | 'pickup_at' | 'delivered_at' | 'estimated_delivery_minutes' | 'actual_delivery_minutes' | 'eta_ts' | 'route_id'>>) {
-    const keys = Object.keys(patch);
-    if (!keys.length) return;
-    const set = keys.map((k) => `${k} = ?`).join(', ');
-    qRun(`UPDATE deliveries SET ${set} WHERE id = ?`, ...keys.map((k) => (patch as Record<string, unknown>)[k]), dsid);
-  },
-  setStatus(dsid: string, to: DeliveryStatus, expectedFrom?: DeliveryStatus | DeliveryStatus[]): DeliveryRow {
-    const current = deliveries.byId(dsid);
-    if (!current) throw new Error('delivery not found');
-    if (expectedFrom) {
-      const allowed = Array.isArray(expectedFrom) ? expectedFrom : [expectedFrom];
-      if (!allowed.includes(current.status)) throw new Error(`delivery ${dsid} expected ${allowed.join('/')} but was ${current.status}`);
-    }
-    assertDeliveryTransition(current.status, to);
-    db().prepare(`UPDATE deliveries SET status = ? WHERE id = ?`).run(to, dsid);
-    return deliveries.byId(dsid)!;
+  async byOrderId(oid: string) { return first<DeliveryRow>('deliveries', { order_id: `eq.${oid}` }); },
+  async byId(dsid: string) { return first<DeliveryRow>('deliveries', { id: `eq.${dsid}` }); },
+  async byDriver(did: string) { return select<DeliveryRow>('deliveries', { driver_id: `eq.${did}` }, { order: 'created_at.desc' }); },
+  async active() { return select<DeliveryRow>('deliveries', { status: 'not.in.(delivered,cancelled,failed)' }); },
+  async all() { return select<DeliveryRow>('deliveries', {}, { order: 'created_at.desc' }); },
+  async ensure(oid: string): Promise<DeliveryRow> { const existing = await deliveries.byOrderId(oid); if (existing) return existing; const row = await insert<DeliveryRow>('deliveries', { id: id('dlv'), order_id: oid, status: 'pending' }); return row; },
+  async update(dsid: string, patch: Partial<Pick<DeliveryRow, 'driver_id' | 'assigned_at' | 'pickup_at' | 'delivered_at' | 'estimated_delivery_minutes' | 'actual_delivery_minutes' | 'eta_ts' | 'route_id'>>) { if (Object.keys(patch).length) await update('deliveries', { id: `eq.${dsid}` }, patch as Record<string, unknown>); },
+  async setStatus(dsid: string, to: DeliveryStatus, expectedFrom?: DeliveryStatus | DeliveryStatus[]): Promise<DeliveryRow> {
+    const current = await deliveries.byId(dsid); if (!current) throw new Error('delivery not found');
+    if (expectedFrom) { const allowed = Array.isArray(expectedFrom) ? expectedFrom : [expectedFrom]; if (!allowed.includes(current.status)) throw new Error(`delivery ${dsid} expected ${allowed.join('/')} but was ${current.status}`); }
+    assertDeliveryTransition(current.status, to); await update('deliveries', { id: `eq.${dsid}` }, { status: to }); return (await deliveries.byId(dsid))!;
   },
 };
 
-/* ------------------------------------------------------------------ routes */
 export interface RouteRow {
   id: string; delivery_id: string; driver_id: string; origin_lat: number; origin_lng: number;
   legs_json: string; path_json: string; distance_km: number; eta_minutes: number;
   traffic_penalty_minutes: number; active: number; created_at: string;
 }
 
-export const routes = {
-  activeForDelivery(dsid: string): RouteRow | undefined {
-    return db().prepare(`SELECT * FROM routes WHERE delivery_id = ? AND active = 1 ORDER BY id DESC LIMIT 1`).get(dsid) as never;
-  },
-  create(input: { deliveryId: string; driverId: string; originLat: number; originLng: number; legs: unknown; path: unknown; distanceKm: number; etaMinutes: number; trafficPenalty: number }): RouteRow {
-    db().prepare(`UPDATE routes SET active = 0 WHERE delivery_id = ?`).run(input.deliveryId);
-    const rid = id('rte');
-    db().prepare(`
-      INSERT INTO routes (id, delivery_id, driver_id, origin_lat, origin_lng, legs_json, path_json, distance_km, eta_minutes, traffic_penalty_minutes, active)
-      VALUES (?,?,?,?,?,?,?,?,?,?, 1)
-    `).run(rid, input.deliveryId, input.driverId, input.originLat, input.originLng,
-      JSON.stringify(input.legs), JSON.stringify(input.path), input.distanceKm, input.etaMinutes, input.trafficPenalty);
-    return db().prepare(`SELECT * FROM routes WHERE id = ?`).get(rid) as never;
-  },
-};
-
-/* ------------------------------------------------------------- assignments */
-export interface AssignmentRow {
-  id: string; order_id: string; driver_id: string; status: 'proposed' | 'active' | 'cancelled' | 'superseded' | 'rejected';
-  score: number; reasoning_json: string; idempotency_key: string | null; created_at: string;
+function routeRow(row: RouteRow): RouteRow {
+  return { ...row, legs_json: typeof row.legs_json === 'string' ? row.legs_json : JSON.stringify(row.legs_json), path_json: typeof row.path_json === 'string' ? row.path_json : JSON.stringify(row.path_json) };
 }
 
-export const assignments = {
-  activeForOrder(oid: string): AssignmentRow | undefined {
-    return db().prepare(`SELECT * FROM assignments WHERE order_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1`).get(oid) as never;
-  },
-  forOrder(oid: string) { return db().prepare(`SELECT * FROM assignments WHERE order_id = ? ORDER BY id DESC`).all(oid) as unknown as AssignmentRow[]; },
-  byIdempotencyKey(key: string): AssignmentRow | undefined {
-    return db().prepare(`SELECT * FROM assignments WHERE idempotency_key = ?`).get(key) as never;
-  },
-  create(input: { orderId: string; driverId: string; score: number; reasoning: unknown; idempotencyKey?: string | null; status?: AssignmentRow['status'] }): AssignmentRow {
-    db().prepare(`UPDATE assignments SET status = 'superseded' WHERE order_id = ? AND status IN ('proposed','active')`).run(input.orderId);
-    const aid = id('asg');
-    db().prepare(`
-      INSERT INTO assignments (id, order_id, driver_id, status, score, reasoning_json, idempotency_key)
-      VALUES (?,?,?,?,?,?,?)
-    `).run(aid, input.orderId, input.driverId, input.status ?? 'active', input.score, JSON.stringify(input.reasoning), input.idempotencyKey ?? null);
-    return db().prepare(`SELECT * FROM assignments WHERE id = ?`).get(aid) as never;
-  },
-  cancel(oid: string) {
-    db().prepare(`UPDATE assignments SET status = 'cancelled' WHERE order_id = ? AND status IN ('proposed','active')`).run(oid);
+export const routes = {
+  async activeForDelivery(dsid: string) { const row = await first<RouteRow>('routes', { delivery_id: `eq.${dsid}`, active: 'eq.1' }, { order: 'created_at.desc' }); return row ? routeRow(row) : undefined; },
+  async create(input: { deliveryId: string; driverId: string; originLat: number; originLng: number; legs: unknown; path: unknown; distanceKm: number; etaMinutes: number; trafficPenalty: number }): Promise<RouteRow> {
+    await update('routes', { delivery_id: `eq.${input.deliveryId}`, active: 'eq.1' }, { active: 0 });
+    const row = await insert<RouteRow>('routes', { id: id('rte'), delivery_id: input.deliveryId, driver_id: input.driverId, origin_lat: input.originLat, origin_lng: input.originLng, legs_json: input.legs, path_json: input.path, distance_km: input.distanceKm, eta_minutes: input.etaMinutes, traffic_penalty_minutes: input.trafficPenalty, active: 1 });
+    return routeRow(row);
   },
 };
 
-/* -------------------------------------------------------------- road / traffic */
-export interface RoadRow { id: string; ax: number; ay: number; bx: number; by: number; status: 'clear' | 'moderate' | 'heavy' | 'closed'; delay_minutes: number; updated_at: string }
+export interface AssignmentRow { id: string; order_id: string; driver_id: string; status: 'proposed' | 'active' | 'cancelled' | 'superseded' | 'rejected'; score: number; reasoning_json: string; idempotency_key: string | null; created_at: string }
+function assignmentRow(row: AssignmentRow): AssignmentRow { return { ...row, reasoning_json: typeof row.reasoning_json === 'string' ? row.reasoning_json : JSON.stringify(row.reasoning_json) }; }
+export const assignments = {
+  async activeForOrder(oid: string) { const row = await first<AssignmentRow>('assignments', { order_id: `eq.${oid}`, status: 'eq.active' }, { order: 'created_at.desc' }); return row ? assignmentRow(row) : undefined; },
+  async forOrder(oid: string) { return (await select<AssignmentRow>('assignments', { order_id: `eq.${oid}` }, { order: 'created_at.desc' })).map(assignmentRow); },
+  async byIdempotencyKey(key: string) { const row = await first<AssignmentRow>('assignments', { idempotency_key: `eq.${key}` }); return row ? assignmentRow(row) : undefined; },
+  async create(input: { orderId: string; driverId: string; score: number; reasoning: unknown; idempotencyKey?: string | null; status?: AssignmentRow['status'] }): Promise<AssignmentRow> {
+    await update('assignments', { order_id: `eq.${input.orderId}`, status: 'in.(proposed,active)' }, { status: 'superseded' });
+    const row = await insert<AssignmentRow>('assignments', { id: id('asg'), order_id: input.orderId, driver_id: input.driverId, status: input.status ?? 'active', score: input.score, reasoning_json: input.reasoning, idempotency_key: input.idempotencyKey ?? null });
+    return assignmentRow(row);
+  },
+  async cancel(oid: string) { await update('assignments', { order_id: `eq.${oid}`, status: 'in.(proposed,active)' }, { status: 'cancelled' }); },
+};
 
+export interface RoadRow { id: string; ax: number; ay: number; bx: number; by: number; status: 'clear' | 'moderate' | 'heavy' | 'closed'; delay_minutes: number; updated_at: string }
 export const roads = {
-  all(): RoadRow[] { return db().prepare(`SELECT * FROM road_segments ORDER BY id`).all() as never; },
-  segments(): Segment[] {
-    return roads.all().map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status, delay_minutes: r.delay_minutes }));
-  },
-  byId(rid: string) { return db().prepare(`SELECT * FROM road_segments WHERE id = ?`).get(rid) as unknown as RoadRow | undefined; },
-  upsert(r: { id: string; ax: number; ay: number; bx: number; by: number; status?: RoadRow['status']; delay?: number }) {
-    db().prepare(`
-      INSERT INTO road_segments (id, ax, ay, bx, by, status, delay_minutes) VALUES (?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET status = excluded.status, delay_minutes = excluded.delay_minutes, updated_at = datetime('now')
-    `).run(r.id, r.ax, r.ay, r.bx, r.by, r.status ?? 'clear', r.delay ?? 0);
-  },
-  setStatus(rid: string, status: RoadRow['status'], delay: number) {
-    db().prepare(`UPDATE road_segments SET status = ?, delay_minutes = ?, updated_at = datetime('now') WHERE id = ?`).run(status, delay, rid);
-  },
+  async all() { return select<RoadRow>('road_segments', {}, { order: 'id.asc' }); },
+  async segments(): Promise<Segment[]> { return (await roads.all()).map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status, delay_minutes: r.delay_minutes })); },
+  async byId(rid: string) { return first<RoadRow>('road_segments', { id: `eq.${rid}` }); },
+  async upsert(r: { id: string; ax: number; ay: number; bx: number; by: number; status?: RoadRow['status']; delay?: number }) { await upsert('road_segments', { id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status ?? 'clear', delay_minutes: r.delay ?? 0 }, 'id'); },
+  async upsertMany(rows: { id: string; ax: number; ay: number; bx: number; by: number; status?: RoadRow['status']; delay?: number }[]) { await upsertMany('road_segments', rows.map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status ?? 'clear', delay_minutes: r.delay ?? 0 })), 'id'); },
+  async setStatus(rid: string, status: RoadRow['status'], delay: number) { await update('road_segments', { id: `eq.${rid}` }, { status, delay_minutes: delay, updated_at: nowIso() }); },
 };
 
 export const traffic = {
-  all() { return db().prepare(`SELECT * FROM traffic_conditions ORDER BY area`).all() as { id: string; area: string; status: string; delay_minutes: number; source: string; updated_at: string }[]; },
-  upsert(t: { id: string; area: string; status: 'clear' | 'moderate' | 'heavy'; delay: number; source: string }) {
-    db().prepare(`
-      INSERT INTO traffic_conditions (id, area, status, delay_minutes, source) VALUES (?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET status = excluded.status, delay_minutes = excluded.delay_minutes, source = excluded.source, updated_at = datetime('now')
-    `).run(t.id, t.area, t.status, t.delay, t.source);
-  },
+  async all() { return select<{ id: string; area: string; status: string; delay_minutes: number; source: string; updated_at: string }>('traffic_conditions', {}, { order: 'area.asc' }); },
+  async upsert(t: { id: string; area: string; status: 'clear' | 'moderate' | 'heavy'; delay: number; source: string }) { await upsert('traffic_conditions', { id: t.id, area: t.area, status: t.status, delay_minutes: t.delay, source: t.source }, 'id'); },
 };

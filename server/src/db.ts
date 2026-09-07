@@ -1,223 +1,135 @@
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { config } from './config.js';
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  password_salt TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin','merchant','driver','customer')),
-  name TEXT NOT NULL,
-  ref_id TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+export type SupabaseRow = Record<string, unknown>;
 
-CREATE TABLE IF NOT EXISTS merchants (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS stores (
-  id TEXT PRIMARY KEY,
-  merchant_id TEXT NOT NULL REFERENCES merchants(id),
-  name TEXT NOT NULL,
-  pickup_lat REAL NOT NULL,
-  pickup_lng REAL NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS customers (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS drivers (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  vehicle_type TEXT NOT NULL CHECK (vehicle_type IN ('bike','car','van','truck')),
-  capacity INTEGER NOT NULL,
-  max_package_size TEXT NOT NULL CHECK (max_package_size IN ('small','medium','large')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS driver_status (
-  driver_id TEXT PRIMARY KEY REFERENCES drivers(id),
-  status TEXT NOT NULL CHECK (status IN ('available','on_route','break','offline')),
-  current_order_count INTEGER NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS driver_locations (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  driver_id TEXT NOT NULL REFERENCES drivers(id),
-  lat REAL NOT NULL,
-  lng REAL NOT NULL,
-  recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_driver_locations_driver ON driver_locations(driver_id, id DESC);
-
-CREATE TABLE IF NOT EXISTS orders (
-  id TEXT PRIMARY KEY,
-  merchant_id TEXT NOT NULL REFERENCES merchants(id),
-  store_id TEXT NOT NULL REFERENCES stores(id),
-  customer_id TEXT NOT NULL REFERENCES customers(id),
-  pickup_lat REAL NOT NULL,
-  pickup_lng REAL NOT NULL,
-  delivery_lat REAL NOT NULL,
-  delivery_lng REAL NOT NULL,
-  status TEXT NOT NULL DEFAULT 'created'
-    CHECK (status IN ('created','ready','validated','dispatching','assigned','picked_up','delivering','delivered','cancelled','failed')),
-  priority TEXT NOT NULL DEFAULT 'standard' CHECK (priority IN ('standard','express')),
-  deadline_ts TEXT NOT NULL,
-  package_size TEXT NOT NULL CHECK (package_size IN ('small','medium','large')),
-  volume INTEGER NOT NULL DEFAULT 1,
-  note TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  ready_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_orders_merchant ON orders(merchant_id);
-CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
-
-CREATE TABLE IF NOT EXISTS order_items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_id TEXT NOT NULL REFERENCES orders(id),
-  name TEXT NOT NULL,
-  qty INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS deliveries (
-  id TEXT PRIMARY KEY,
-  order_id TEXT NOT NULL UNIQUE REFERENCES orders(id),
-  driver_id TEXT REFERENCES drivers(id),
-  status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending','assigned','en_route_pickup','picked_up','en_route_drop','delivered','cancelled','failed')),
-  assigned_at TEXT,
-  pickup_at TEXT,
-  delivered_at TEXT,
-  estimated_delivery_minutes REAL,
-  actual_delivery_minutes REAL,
-  eta_ts TEXT,
-  route_id TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS routes (
-  id TEXT PRIMARY KEY,
-  delivery_id TEXT NOT NULL REFERENCES deliveries(id),
-  driver_id TEXT NOT NULL REFERENCES drivers(id),
-  origin_lat REAL NOT NULL,
-  origin_lng REAL NOT NULL,
-  legs_json TEXT NOT NULL,
-  path_json TEXT NOT NULL,
-  distance_km REAL NOT NULL,
-  eta_minutes REAL NOT NULL,
-  traffic_penalty_minutes REAL NOT NULL DEFAULT 0,
-  active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_routes_delivery ON routes(delivery_id, active);
-
-CREATE TABLE IF NOT EXISTS assignments (
-  id TEXT PRIMARY KEY,
-  order_id TEXT NOT NULL REFERENCES orders(id),
-  driver_id TEXT NOT NULL REFERENCES drivers(id),
-  status TEXT NOT NULL CHECK (status IN ('proposed','active','cancelled','superseded','rejected')),
-  score REAL NOT NULL,
-  reasoning_json TEXT NOT NULL,
-  idempotency_key TEXT UNIQUE,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_assignments_order ON assignments(order_id, status);
-
-CREATE TABLE IF NOT EXISTS road_segments (
-  id TEXT PRIMARY KEY,
-  ax INTEGER NOT NULL, ay INTEGER NOT NULL,
-  bx INTEGER NOT NULL, by INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'clear' CHECK (status IN ('clear','moderate','heavy','closed')),
-  delay_minutes REAL NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS traffic_conditions (
-  id TEXT PRIMARY KEY,
-  area TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('clear','moderate','heavy')),
-  delay_minutes REAL NOT NULL DEFAULT 0,
-  source TEXT,
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS agent_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts TEXT NOT NULL DEFAULT (datetime('now','subsec')),
-  cycle_id TEXT,
-  agent TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  order_id TEXT,
-  delivery_id TEXT,
-  driver_id TEXT,
-  message TEXT NOT NULL,
-  data_json TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_agent_events_order ON agent_events(order_id, id DESC);
-`;
-
-let instance: DatabaseSync | null = null;
-
-export function getDb(): DatabaseSync {
-  if (instance) return instance;
-  const file = config.dbFile === ':memory:' ? ':memory:' : config.dbFile;
-  if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec('PRAGMA journal_mode = WAL;');
-  db.exec('PRAGMA foreign_keys = ON;');
-  db.exec('PRAGMA busy_timeout = 4000;');
-  db.exec(SCHEMA);
-  instance = db;
-  return db;
+function endpoint(table: string, query = ''): string {
+  const baseUrl = config.supabase.url.replace(/\/+$/, '');
+  return `${baseUrl}/rest/v1/${table}${query ? `?${query}` : ''}`;
 }
 
-/* Thin typed query helpers. node:sqlite returns `Record<string, SQLOutputValue>`;
- * our schema guarantees the shape, so we assert it in one place. */
-type Param = string | number | bigint | null | Uint8Array;
-const coerce = (params: unknown[]): Param[] =>
-  params.map((p) => (typeof p === 'boolean' ? (p ? 1 : 0) : p)) as Param[];
+async function request<T>(table: string, init: RequestInit = {}, queryString = ''): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set('apikey', config.supabase.serviceRoleKey);
+  headers.set('authorization', `Bearer ${config.supabase.serviceRoleKey}`);
+  headers.set('content-type', 'application/json');
+  headers.set('accept', 'application/json');
+  const response = await fetch(endpoint(table, queryString), { ...init, headers });
+  const text = await response.text();
+  let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!response.ok) {
+    const detail = typeof body === 'object' && body !== null ? JSON.stringify(body) : String(body ?? '');
+    throw new Error(`Supabase ${init.method ?? 'GET'} ${table} failed (${response.status}): ${detail}`);
+  }
+  return body as T;
+}
 
-export function qAll<T>(sql: string, ...params: unknown[]): T[] {
-  return getDb().prepare(sql).all(...coerce(params)) as unknown as T[];
-}
-export function qGet<T>(sql: string, ...params: unknown[]): T | undefined {
-  return getDb().prepare(sql).get(...coerce(params)) as unknown as T | undefined;
-}
-export function qRun(sql: string, ...params: unknown[]) {
-  return getDb().prepare(sql).run(...coerce(params));
+function query(filters: Record<string, string>, extra: Record<string, string> = {}): string {
+  return new URLSearchParams({ ...filters, ...extra }).toString();
 }
 
-/** Run fn inside an IMMEDIATE transaction. Node is single-threaded, so this
- *  block executes atomically with respect to other request handlers. */
-export function tx<T>(fn: (db: DatabaseSync) => T): T {
-  const db = getDb();
-  db.exec('BEGIN IMMEDIATE');
+export async function select<T extends object>(table: string, filters: Record<string, string> = {}, extra: Record<string, string> = {}): Promise<T[]> {
+  return request<T[]>(table, {}, query(filters, { select: '*', ...extra }));
+}
+
+export async function first<T extends object>(table: string, filters: Record<string, string> = {}, extra: Record<string, string> = {}): Promise<T | undefined> {
+  const rows = await select<T>(table, filters, { ...extra, limit: '1' });
+  return rows[0];
+}
+
+export async function insert<T extends object>(table: string, row: SupabaseRow): Promise<T> {
+  const rows = await request<T[]>(table, {
+    method: 'POST',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify(row),
+  });
+  if (!rows[0]) throw new Error(`Supabase insert into ${table} returned no row`);
+  return rows[0];
+}
+
+export async function insertMany<T extends object>(table: string, rows: SupabaseRow[]): Promise<T[]> {
+  if (!rows.length) return [];
+  return request<T[]>(table, {
+    method: 'POST',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify(rows),
+  });
+}
+
+export async function upsert<T extends object>(table: string, row: SupabaseRow, conflict = 'id'): Promise<T> {
+  const rows = await request<T[]>(table, {
+    method: 'POST',
+    headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+    body: JSON.stringify(row),
+  }, query({}, { on_conflict: conflict }));
+  if (!rows[0]) throw new Error(`Supabase upsert into ${table} returned no row`);
+  return rows[0];
+}
+
+export async function upsertMany<T extends object>(table: string, rows: SupabaseRow[], conflict = 'id'): Promise<T[]> {
+  if (!rows.length) return [];
+  return request<T[]>(table, {
+    method: 'POST',
+    headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+    body: JSON.stringify(rows),
+  }, query({}, { on_conflict: conflict }));
+}
+
+export async function update(table: string, filters: Record<string, string>, patch: SupabaseRow): Promise<void> {
+  await request(table, {
+    method: 'PATCH',
+    headers: { Prefer: 'return=minimal' },
+    body: JSON.stringify(patch),
+  }, query(filters));
+}
+
+export async function remove(table: string, filters: Record<string, string>): Promise<void> {
+  if (Object.keys(filters).length === 0) {
+    throw new Error(`Supabase DELETE ${table} requires a filter`);
+  }
+  await request(table, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, query(filters));
+}
+
+/** Verify that the configured Supabase project is reachable. */
+export async function getDb(): Promise<void> {
+  if (!config.supabase.url || !config.supabase.serviceRoleKey) {
+    throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set for the database connection');
+  }
+  let parsed: URL;
+  try { parsed = new URL(config.supabase.url); } catch { throw new Error('SUPABASE_URL must be a valid https:// URL'); }
+  if (parsed.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
+    throw new Error('SUPABASE_URL must use https:// in production');
+  }
   try {
-    const result = fn(db);
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
-    throw err;
+    await select('users', {}, { select: 'id', limit: '1' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/failed \(401\).*Invalid API key/i.test(message)) {
+      throw new Error('Supabase rejected SUPABASE_SERVICE_ROLE_KEY. Copy a fresh service_role/secret key from the same Supabase project into .env.');
+    }
+    throw error;
   }
 }
 
-export function resetDb(): void {
-  const db = getDb();
-  const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all() as { name: string }[];
-  db.exec('PRAGMA foreign_keys = OFF;');
-  for (const { name } of tables) db.exec(`DELETE FROM ${name}`);
-  db.exec(`DELETE FROM sqlite_sequence`);
-  db.exec('PRAGMA foreign_keys = ON;');
+/** PostgREST requests are individually atomic. Multi-row critical workflows
+ * should use Supabase RPC functions when strict transactionality is required. */
+export async function tx<T>(fn: () => Promise<T>): Promise<T> {
+  return fn();
+}
+
+export async function resetDb(): Promise<void> {
+  // PostgREST deliberately rejects an unrestricted DELETE. Every table uses
+  // a non-null primary key, so this remains a full reset while still sending
+  // an explicit WHERE clause. driver_status uses driver_id as its key.
+  const tables: [string, string][] = [
+    ['agent_events', 'id'], ['assignments', 'id'], ['routes', 'id'],
+    ['deliveries', 'id'], ['order_items', 'id'], ['orders', 'id'],
+    ['driver_locations', 'id'], ['driver_status', 'driver_id'],
+    ['drivers', 'id'], ['stores', 'id'], ['customers', 'id'],
+    ['merchants', 'id'], ['traffic_conditions', 'id'],
+    ['road_segments', 'id'], ['users', 'id'],
+  ];
+  for (const [table, primaryKey] of tables) {
+    await remove(table, { [primaryKey]: 'not.is.null' });
+  }
 }

@@ -41,6 +41,13 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   }
   // repo compare-and-set failures surface as plain Error — treat as conflict
   const message = err instanceof Error ? err.message : 'Unknown error';
+  if (/^Supabase /.test(message) || /fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|timed out/i.test(message)) {
+    console.error('[api] database unavailable', req.method, req.path, err);
+    return res.status(503).json({
+      error: 'database_unavailable',
+      message: 'Database unavailable. Check SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and that the Supabase schema has been applied.',
+    });
+  }
   if (/expected .* but was |Illegal .* transition|vanished|became |already /.test(message)) {
     return res.status(409).json({ error: 'conflict', message });
   }

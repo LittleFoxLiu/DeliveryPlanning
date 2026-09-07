@@ -6,7 +6,7 @@ let c: ReturnType<typeof client>;
 
 beforeAll(async () => { ctx = await startTestServer(); c = client(ctx.base); });
 afterAll(async () => { await ctx.close(); });
-beforeEach(() => reseed());
+beforeEach(async () => { await reseed(); });
 
 const createdOrders = async (token: string) =>
   (await c.get('/merchant/orders', token)).body.orders as { id: string; status: string }[];

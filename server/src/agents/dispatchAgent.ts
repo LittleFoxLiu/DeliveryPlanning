@@ -25,37 +25,37 @@ export const dispatchTools = {
     estimate: RoutedCandidate['estimate'];
     idempotencyKey?: string | null;
     cycleId: string;
-  }): { assignment: AssignmentRow; deliveryId: string; reused: boolean } {
-    return tx(() => {
+  }): Promise<{ assignment: AssignmentRow; deliveryId: string; reused: boolean }> {
+    return tx(async () => {
       if (input.idempotencyKey) {
-        const existing = assignments.byIdempotencyKey(input.idempotencyKey);
+        const existing = await assignments.byIdempotencyKey(input.idempotencyKey);
         if (existing) {
-          const dlv = deliveries.byOrderId(input.order.id);
+          const dlv = await deliveries.byOrderId(input.order.id);
           return { assignment: existing, deliveryId: dlv?.id ?? '', reused: true };
         }
       }
 
-      const fresh = orders.byId(input.order.id);
+      const fresh = await orders.byId(input.order.id);
       if (!fresh) throw conflict('order vanished');
       if (fresh.status === 'assigned' || fresh.status === 'picked_up' || fresh.status === 'delivering') {
-        const active = assignments.activeForOrder(fresh.id);
-        if (active) return { assignment: active, deliveryId: deliveries.byOrderId(fresh.id)?.id ?? '', reused: true };
+        const active = await assignments.activeForOrder(fresh.id);
+        if (active) return { assignment: active, deliveryId: (await deliveries.byOrderId(fresh.id))?.id ?? '', reused: true };
       }
       if (!['validated', 'dispatching'].includes(fresh.status)) {
         throw conflict(`order ${fresh.id} is ${fresh.status}, cannot assign`);
       }
 
-      const driver = drivers.byId(input.driverId);
+      const driver = await drivers.byId(input.driverId);
       if (!driver) throw conflict('driver vanished');
       if (driver.status === 'offline' || driver.status === 'break') throw conflict('driver became unavailable');
       if (driver.capacity - driver.current_order_count < 1) throw conflict('driver became full');
 
-      const delivery = deliveries.ensure(input.order.id);
+      const delivery = await deliveries.ensure(input.order.id);
       if (!['pending', 'failed', 'cancelled'].includes(delivery.status)) {
         throw conflict(`delivery already ${delivery.status}`);
       }
 
-      const assignment = assignments.create({
+      const assignment = await assignments.create({
         orderId: input.order.id,
         driverId: input.driverId,
         score: input.score,
@@ -65,7 +65,7 @@ export const dispatchTools = {
       });
 
       const est = input.estimate;
-      const route = routes.create({
+      const route = await routes.create({
         deliveryId: delivery.id,
         driverId: input.driverId,
         originLat: driver.lat as number,
@@ -82,11 +82,11 @@ export const dispatchTools = {
       });
 
       if (delivery.status === 'failed' || delivery.status === 'cancelled') {
-        deliveries.setStatus(delivery.id, 'assigned', ['failed', 'cancelled']);
+        await deliveries.setStatus(delivery.id, 'assigned', ['failed', 'cancelled']);
       } else {
-        deliveries.setStatus(delivery.id, 'assigned', 'pending');
+        await deliveries.setStatus(delivery.id, 'assigned', 'pending');
       }
-      deliveries.update(delivery.id, {
+      await deliveries.update(delivery.id, {
         driver_id: input.driverId,
         assigned_at: nowIso(),
         estimated_delivery_minutes: est.totalMinutes,
@@ -94,16 +94,16 @@ export const dispatchTools = {
         route_id: route.id,
       });
 
-      drivers.adjustOrderCount(input.driverId, 1);
-      drivers.setStatus(input.driverId, 'on_route');
-      orders.setStatus(input.order.id, 'assigned', ['validated', 'dispatching']);
+      await drivers.adjustOrderCount(input.driverId, 1);
+      await drivers.setStatus(input.driverId, 'on_route');
+      await orders.setStatus(input.order.id, 'assigned', ['validated', 'dispatching']);
 
       return { assignment, deliveryId: delivery.id, reused: false };
     });
   },
 
-  notify_driver(driverId: string, orderId: string, deliveryId: string, cycleId: string, eta: number) {
-    emitAgentEvent({
+  async notify_driver(driverId: string, orderId: string, deliveryId: string, cycleId: string, eta: number) {
+    await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'driver_notified', orderId, deliveryId, driverId,
       message: `Notified driver ${driverId} of assignment for order ${orderId} — ETA ${eta} min. Awaiting acceptance.`,
     });
@@ -112,29 +112,29 @@ export const dispatchTools = {
   /** Detach the current driver so the order can be re-dispatched. The Coordinator
    *  then re-runs the candidate → route → evaluate → assign pipeline with the
    *  previous driver excluded. Returns the freed driver id. */
-  reassign_order(orderId: string, reason: string, cycleId: string): { previousDriverId: string | null } {
-    const previous = dispatchTools.cancel_assignment(orderId, reason, cycleId);
+  async reassign_order(orderId: string, reason: string, cycleId: string): Promise<{ previousDriverId: string | null }> {
+    const previous = await dispatchTools.cancel_assignment(orderId, reason, cycleId);
     return { previousDriverId: previous?.driver_id ?? null };
   },
 
   /** Cancel the active assignment for an order and roll back driver load.
    *  Refuses to touch a delivery that is already terminal. */
-  cancel_assignment(orderId: string, reason: string, cycleId: string) {
-    return tx(() => {
-      const delivery = deliveries.byOrderId(orderId);
+  async cancel_assignment(orderId: string, reason: string, cycleId: string) {
+    return tx(async () => {
+      const delivery = await deliveries.byOrderId(orderId);
       if (delivery && ['delivered', 'cancelled'].includes(delivery.status)) {
         throw conflict(`cannot cancel a ${delivery.status} delivery`);
       }
-      const active = assignments.activeForOrder(orderId);
-      assignments.cancel(orderId);
-      if (active) drivers.adjustOrderCount(active.driver_id, -1);
+      const active = await assignments.activeForOrder(orderId);
+      await assignments.cancel(orderId);
+      if (active) await drivers.adjustOrderCount(active.driver_id, -1);
       if (delivery && active) {
         // free the driver if they have nothing else on
-        const remaining = deliveries.byDriver(active.driver_id)
+        const remaining = (await deliveries.byDriver(active.driver_id))
           .filter((d) => d.id !== delivery.id && !['delivered', 'cancelled', 'failed'].includes(d.status));
-        if (remaining.length === 0) drivers.setStatus(active.driver_id, 'available');
+        if (remaining.length === 0) await drivers.setStatus(active.driver_id, 'available');
       }
-      emitAgentEvent({
+      await emitAgentEvent({
         cycleId, agent: NAME, eventType: 'assignment_cancelled', orderId, deliveryId: delivery?.id ?? null,
         driverId: active?.driver_id ?? null, message: `Cancelled assignment for order ${orderId}: ${reason}`,
       });
@@ -159,11 +159,11 @@ export const dispatchAgent = {
 
   /** Evaluate every routed candidate with the deterministic scorer, compare,
    *  and assign the best driver. Produces an explainable decision. */
-  evaluateAndAssign(
+  async evaluateAndAssign(
     order: OrderRow, routed: RoutedCandidate[], cycleId: string, opts: { idempotencyKey?: string | null } = {},
-  ): DispatchDecision {
+  ): Promise<DispatchDecision> {
     if (routed.length === 0) {
-      emitAgentEvent({
+      await emitAgentEvent({
         cycleId, agent: NAME, eventType: 'assignment_failed', orderId: order.id,
         message: `No candidate drivers to evaluate for order ${order.id}`,
       });
@@ -192,7 +192,7 @@ export const dispatchAgent = {
 
     const comparison = dispatchTools.compare_assignments(breakdowns);
 
-    emitAgentEvent({
+    await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'candidates_evaluated', orderId: order.id,
       message: `Evaluated ${breakdowns.length} candidates for order ${order.id}: `
         + comparison.ranked.map((b) => `${b.driverId}=${b.eligible ? b.score : 'X'}`).join(', '),
@@ -200,7 +200,7 @@ export const dispatchAgent = {
     });
 
     if (!comparison.winner) {
-      emitAgentEvent({
+      await emitAgentEvent({
         cycleId, agent: NAME, eventType: 'assignment_failed', orderId: order.id,
         message: `No eligible driver for order ${order.id}: ${comparison.rationale}`,
         data: { ranked: comparison.ranked },
@@ -222,7 +222,7 @@ export const dispatchAgent = {
 
     let result;
     try {
-      result = dispatchTools.assign_order({
+      result = await dispatchTools.assign_order({
         order,
         driverId: comparison.winner.driverId,
         score: comparison.winner.score,
@@ -232,7 +232,7 @@ export const dispatchAgent = {
         cycleId,
       });
     } catch (err) {
-      emitAgentEvent({
+      await emitAgentEvent({
         cycleId, agent: NAME, eventType: 'assignment_conflict', orderId: order.id,
         message: `Assignment blocked: ${(err as Error).message}`,
       });
@@ -240,7 +240,7 @@ export const dispatchAgent = {
     }
 
     const winner = comparison.winner;
-    emitAgentEvent({
+    await emitAgentEvent({
       cycleId, agent: NAME, eventType: result.reused ? 'assignment_reused' : 'driver_assigned',
       orderId: order.id, deliveryId: result.deliveryId, driverId: winner.driverId,
       message: result.reused
@@ -251,7 +251,7 @@ export const dispatchAgent = {
     });
 
     if (!result.reused) {
-      dispatchTools.notify_driver(winner.driverId, order.id, result.deliveryId, cycleId, winner.factors.totalDeliveryMin);
+      await dispatchTools.notify_driver(winner.driverId, order.id, result.deliveryId, cycleId, winner.factors.totalDeliveryMin);
     }
 
     return {
