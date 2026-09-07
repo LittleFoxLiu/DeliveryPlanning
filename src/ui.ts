@@ -35,6 +35,14 @@ export function minutesUntil(ts: string | null | undefined): number | null {
   return Math.round((t - Date.now()) / 60_000);
 }
 
+/** Value for an <input type="datetime-local">, in LOCAL wall-clock time
+ *  (not UTC — datetime-local has no timezone). */
+export function localDatetimeValue(msFromNow: number): string {
+  const d = new Date(Date.now() + msFromNow);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export function relTime(ts: string): string {
   const diff = Date.now() - parseTs(ts);
   if (!Number.isFinite(diff)) return '';

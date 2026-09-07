@@ -1,5 +1,5 @@
 import { get, post, ApiError } from '../api';
-import { poll } from '../main';
+import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, fmtTime, minutesUntil } from '../ui';
 import { renderMap, routeToPath, type MapMarker, type MapPath } from '../map';
 import type { RoadSeg, Point } from '../types';
@@ -14,19 +14,20 @@ interface DriverDelivery {
 let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
 
 export async function renderDriver(el: HTMLElement): Promise<void> {
+  resetSig('driver');
   try { grid = await get('/meta/grid'); } catch { /* ignore */ }
   const draw = async () => {
     try {
       const { deliveries } = await get<{ deliveries: DriverDelivery[] }>('/driver/deliveries');
       const active = deliveries.filter((d) => !['delivered', 'cancelled', 'failed'].includes(d.status));
-      el.innerHTML = view(active, deliveries);
-      wire(el);
+      if (!changed('driver', deliveries)) return;
+      if (patchView(el, view(active, deliveries))) wire(el); else resetSig('driver');
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) location.reload();
+      if (err instanceof ApiError && err.status === 401) handleUnauthed();
     }
   };
   await draw();
-  poll(draw, 3000);
+  poll(draw, 4000);
 }
 
 function view(active: DriverDelivery[], all: DriverDelivery[]): string {

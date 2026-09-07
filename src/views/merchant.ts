@@ -1,7 +1,7 @@
 import type { OrderDto } from '../types';
 import { get, post, ApiError } from '../api';
-import { poll } from '../main';
-import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed } from '../ui';
+import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
+import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue } from '../ui';
 
 interface MerchantOrders { orders: OrderDto[] }
 interface OrderDetail { order: OrderDto; delivery: OrderDto['delivery']; assignedDriver: { name: string; vehicleType: string; status: string } | null; events: { agent: string; message: string; ts: string }[] }
@@ -10,6 +10,7 @@ let selected: string | null = null;
 let stores: { id: string; name: string; pickup: { x: number; y: number } }[] = [];
 
 export async function renderMerchant(el: HTMLElement): Promise<void> {
+  resetSig('merchant');
   try { stores = (await get<{ stores: typeof stores }>('/merchant/stores')).stores; } catch { /* ignore */ }
   const draw = async () => {
     try {
@@ -17,14 +18,14 @@ export async function renderMerchant(el: HTMLElement): Promise<void> {
       if (!selected && orders.length) selected = orders[0].id;
       let detail: OrderDetail | null = null;
       if (selected) { try { detail = await get<OrderDetail>(`/merchant/orders/${selected}`); } catch { detail = null; } }
-      el.innerHTML = view(orders, detail);
-      wire(el, orders);
+      if (!changed('merchant', { orders, detail, selected })) return;
+      if (patchView(el, view(orders, detail))) wire(el, orders); else resetSig('merchant');
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) location.reload();
+      if (err instanceof ApiError && err.status === 401) handleUnauthed();
     }
   };
   await draw();
-  poll(draw, 3500);
+  poll(draw, 4000);
 }
 
 function view(orders: OrderDto[], detail: OrderDetail | null): string {
@@ -71,7 +72,7 @@ function detailBody(d: OrderDetail): string {
 }
 
 function newOrderCard(): string {
-  const soon = new Date(Date.now() + 75 * 60_000).toISOString().slice(0, 16);
+  const soon = localDatetimeValue(75 * 60_000);
   return `<div class="card">
     <div class="card-head"><h2>New order</h2></div>
     <form class="inline-form" id="new-order">

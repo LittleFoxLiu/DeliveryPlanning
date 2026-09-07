@@ -1,6 +1,6 @@
 import type { OrderDto, DriverDto, AgentEvent, RoadSeg } from '../types';
 import { get, post, ApiError } from '../api';
-import { poll } from '../main';
+import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil } from '../ui';
 import { renderMap, routeToPath, type MapMarker, type MapPath } from '../map';
 
@@ -25,18 +25,19 @@ let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
 let expanded = new Set<string>();
 
 export async function renderAdmin(el: HTMLElement): Promise<void> {
+  resetSig('admin');
   try { grid = await get('/meta/grid'); } catch { /* retry next poll */ }
   const draw = async () => {
     try {
       const ov = await get<Overview>('/admin/overview');
-      el.innerHTML = view(ov);
-      wire(el, ov);
+      if (!changed('admin', { ov, expanded: [...expanded] })) return;
+      if (patchView(el, view(ov))) wire(el, ov); else resetSig('admin');
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) location.reload();
+      if (err instanceof ApiError && err.status === 401) handleUnauthed();
     }
   };
   await draw();
-  poll(draw, 3000);
+  poll(draw, 3500);
 }
 
 function view(ov: Overview): string {

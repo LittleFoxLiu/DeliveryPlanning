@@ -1,6 +1,6 @@
 import { get, post, ApiError } from '../api';
-import { poll } from '../main';
-import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed } from '../ui';
+import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
+import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue } from '../ui';
 import { renderMap, type MapMarker } from '../map';
 import type { RoadSeg, Point } from '../types';
 
@@ -19,6 +19,7 @@ let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
 let merchants: { id: string; name: string; stores: { id: string; name: string }[] }[] = [];
 
 export async function renderCustomer(el: HTMLElement): Promise<void> {
+  resetSig('customer');
   try { grid = await get('/meta/grid'); } catch { /* ignore */ }
   try { merchants = (await get<{ merchants: typeof merchants }>('/directory/merchants')).merchants; } catch { /* ignore */ }
   const draw = async () => {
@@ -27,14 +28,14 @@ export async function renderCustomer(el: HTMLElement): Promise<void> {
       if (!selected && orders.length) selected = orders[0].id;
       let t: Tracking | null = null;
       if (selected) { try { t = await get<Tracking>(`/customer/orders/${selected}`); } catch { t = null; } }
-      el.innerHTML = view(orders, t);
-      wire(el, orders);
+      if (!changed('customer', { orders, t, selected })) return;
+      if (patchView(el, view(orders, t))) wire(el, orders); else resetSig('customer');
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) location.reload();
+      if (err instanceof ApiError && err.status === 401) handleUnauthed();
     }
   };
   await draw();
-  poll(draw, 3000);
+  poll(draw, 4000);
 }
 
 function view(orders: { id: string; status: string }[], t: Tracking | null): string {
@@ -79,7 +80,7 @@ function mapFor(t: Tracking): string {
 }
 
 function orderForm(): string {
-  const soon = new Date(Date.now() + 80 * 60_000).toISOString().slice(0, 16);
+  const soon = localDatetimeValue(80 * 60_000);
   const storeOpts = merchants.flatMap((m) => m.stores.map((s) => `<option value="${esc(s.id)}">${esc(m.name)} — ${esc(s.name)}</option>`)).join('');
   return `<div class="card">
     <div class="card-head"><h2>Place an order</h2></div>

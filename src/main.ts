@@ -18,6 +18,74 @@ export function poll(fn: () => void, ms: number): void {
   pollTimer = window.setInterval(fn, ms);
 }
 
+/** Session ended server-side (e.g. API restarted in dev). Return to login
+ *  in place — never a full page reload. */
+export function handleUnauthed(): void {
+  stopPolling();
+  clearSession();
+  route();
+}
+
+type Field = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+const fieldKey = (f: Element): string => {
+  const form = (f as HTMLElement).closest('form')?.id || '_';
+  return `${form}:${f.getAttribute('name') || ''}`;
+};
+
+/**
+ * Replace a view's content while protecting a form the user is editing:
+ *  - never re-renders while a <select> in the view is open/focused;
+ *  - carries over the values of named fields the user has changed;
+ *  - restores focus and caret position to the field being typed in.
+ * Returns false if it declined to render (open <select>).
+ */
+export function patchView(el: HTMLElement, html: string): boolean {
+  const active = document.activeElement as Field | null;
+  const focused = active && el.contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) ? active : null;
+  if (focused && focused.tagName === 'SELECT') return false;
+
+  const caret = focused && 'selectionStart' in focused
+    ? { key: fieldKey(focused), start: focused.selectionStart, end: focused.selectionEnd }
+    : null;
+
+  const saved = new Map<string, string>();
+  el.querySelectorAll<Field>('[name]').forEach((f) => saved.set(fieldKey(f), f.value));
+  const feedTop = el.querySelector('.event-feed')?.scrollTop ?? 0;
+
+  el.innerHTML = html;
+
+  el.querySelectorAll<Field>('[name]').forEach((f) => {
+    // Form fields here are never server-driven — always carry the user's input
+    // across a re-render (including a field they deliberately cleared).
+    const prev = saved.get(fieldKey(f));
+    if (prev !== undefined) f.value = prev;
+  });
+
+  if (caret) {
+    let target: Field | null = null;
+    el.querySelectorAll<Field>('[name]').forEach((f) => { if (fieldKey(f) === caret.key) target = f; });
+    if (target) {
+      (target as Field).focus();
+      try { (target as HTMLInputElement).setSelectionRange(caret.start, caret.end); } catch { /* number/date inputs */ }
+    }
+  }
+
+  const feed = el.querySelector<HTMLElement>('.event-feed');
+  if (feed) feed.scrollTop = feedTop;
+  return true;
+}
+
+/** Per-view guard: returns true only when `data` differs from the last render,
+ *  so idle polling never re-renders (and never disturbs a form). */
+const sigs = new Map<string, string>();
+export function changed(viewKey: string, data: unknown): boolean {
+  const s = JSON.stringify(data);
+  if (sigs.get(viewKey) === s) return false;
+  sigs.set(viewKey, s);
+  return true;
+}
+export function resetSig(viewKey: string): void { sigs.delete(viewKey); }
+
 const DEMO_ACCOUNTS = [
   { label: 'Dispatch / Admin', email: 'admin@demo.test' },
   { label: 'Merchant — Harbor Grocery', email: 'harbor@demo.test' },
