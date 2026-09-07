@@ -1,75 +1,68 @@
-import { CustomerOrder, RoadSegment, Route } from './types';
+import type { Point, RoadSeg } from './types';
 
-export const GRID_SIZE = 20;
-const BASE_SIZE = 1000;
-const CELL = BASE_SIZE / GRID_SIZE;
-const DEPOT = { x: 10, y: 10 };
-let sharedZoom = 1;
-const anchors: Record<string, { x: number; y: number }> = {
-  North: { x: 16, y: 3 }, Central: { x: 11, y: 10 }, Harbor: { x: 17, y: 14 },
-  West: { x: 4, y: 11 }, South: { x: 12, y: 18 },
-};
+const BASE = 1000;
 
-export function coordinateForOrder(order: CustomerOrder, index = 0): { x: number; y: number } {
-  if (Number.isFinite(order.gridX) && Number.isFinite(order.gridY)) return { x: order.gridX!, y: order.gridY! };
-  const anchor = anchors[order.zone] || { x: 10, y: 10 };
-  return { x: Math.max(0, Math.min(GRID_SIZE, anchor.x + (index % 3) - 1)), y: Math.max(0, Math.min(GRID_SIZE, anchor.y + Math.floor(index / 3) - 1)) };
+export interface MapMarker { x: number; y: number; kind: 'pickup' | 'dropoff' | 'driver' | 'depot'; label?: string }
+export interface MapPath { points: Point[]; color: string; active?: boolean; dashed?: boolean }
+
+export interface MapInput {
+  size: number;
+  roads: RoadSeg[];
+  markers: MapMarker[];
+  paths: MapPath[];
 }
 
-function routePoints(route: Route): Array<{ x: number; y: number }> {
-  const points = [DEPOT];
-  let current = DEPOT;
-  for (const [index, order] of route.orders.entries()) {
-    const next = coordinateForOrder(order, index);
-    points.push({ x: next.x, y: current.y }, next);
-    current = next;
-  }
-  points.push({ x: DEPOT.x, y: current.y }, DEPOT);
-  return points;
+const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c] as string
+));
+
+export function renderMap({ size, roads, markers, paths }: MapInput): string {
+  const cell = BASE / (size || 20);
+  const p = (n: number) => (n * cell).toFixed(1);
+  const ok = (q: { x: number; y: number }) => Number.isFinite(q.x) && Number.isFinite(q.y);
+  markers = markers.filter(ok);
+  paths = paths.map((pt) => ({ ...pt, points: pt.points.filter(ok) }));
+
+  const grid = Array.from({ length: size + 1 }, (_, i) =>
+    `<path d="M ${p(i)} 0 V ${BASE}"/><path d="M 0 ${p(i)} H ${BASE}"/>`).join('');
+
+  const roadSvg = roads
+    .filter((r) => r.status !== 'clear')
+    .map((r) => `<path class="road-edge road-${r.status}" d="M ${p(r.ax)} ${p(r.ay)} L ${p(r.bx)} ${p(r.by)}"/>`)
+    .join('');
+
+  const pathSvg = paths.map((path) => {
+    if (path.points.length < 2) return '';
+    const pts = path.points.map((q) => `${p(q.x)},${p(q.y)}`).join(' ');
+    return `<polyline points="${pts}" fill="none" stroke="${path.color}"
+      stroke-width="${path.active ? 7 : 4}" stroke-linecap="round" stroke-linejoin="round"
+      opacity="${path.active ? 0.95 : 0.4}" ${path.dashed ? 'stroke-dasharray="4 10"' : ''}/>`;
+  }).join('');
+
+  const markerSvg = markers.map((m) => {
+    const cx = p(m.x); const cy = p(m.y);
+    const colors: Record<MapMarker['kind'], string> = {
+      pickup: '#f1c75b', dropoff: '#5277d7', driver: '#159c99', depot: '#98a2b3',
+    };
+    const r = m.kind === 'driver' ? 11 : 8;
+    return `<g><circle cx="${cx}" cy="${cy}" r="${r + 4}" fill="${colors[m.kind]}" opacity="0.18"/>` +
+      `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${colors[m.kind]}" stroke="#fff" stroke-width="2">` +
+      `<title>${esc(m.label || m.kind)} · (${m.x}, ${m.y})</title></circle></g>`;
+  }).join('');
+
+  return `<div class="map-wrap"><svg viewBox="-20 -20 ${BASE + 40} ${BASE + 40}" class="grid-map" role="img" aria-label="Delivery grid">
+    <g class="grid-lines" stroke="#e7e9ed" stroke-width="1">${grid}</g>
+    ${roadSvg}${pathSvg}${markerSvg}
+  </svg>
+  <div class="map-key">
+    <span><i style="background:#f1c75b"></i>Pickup</span>
+    <span><i style="background:#5277d7"></i>Drop-off</span>
+    <span><i style="background:#159c99"></i>Driver</span>
+    <span><i style="background:#db4e36"></i>Closed road</span>
+  </div></div>`;
 }
 
-const pointsToString = (points: Array<{ x: number; y: number }>): string => points.map(p => `${p.x * CELL},${p.y * CELL}`).join(' ');
-
-export function renderCoordinateMap(routes: Route[], selected: number, roads: RoadSegment[] = []): string {
-  const grid = Array.from({ length: GRID_SIZE + 1 }, (_, i) => `<path d="M ${i * CELL} 0 V ${BASE_SIZE}"/><path d="M 0 ${i * CELL} H ${BASE_SIZE}"/>`).join('');
-  const roadSvg = roads.map(r => `<path class="road-edge road-${r.status.toLowerCase()}" d="M ${r.startX * CELL} ${r.startY * CELL} L ${r.endX * CELL} ${r.endY * CELL}"/>`).join('');
-  const routeSvg = routes.map((r, i) => `<polyline class="route-line ${i === selected ? 'active' : 'faint'}" points="${pointsToString(routePoints(r))}"/>`).join('');
-  const nodes = routes.flatMap((r, ri) => r.orders.map((o, oi) => { const p = coordinateForOrder(o, oi); return `<circle class="route-node customer" cx="${p.x * CELL}" cy="${p.y * CELL}" r="7"><title>${o.customer} · Rd. X${p.x} · Y${p.y}</title></circle>`; })).join('');
-  return `<div class="map-preview coordinate-map"><div class="map-controls"><button type="button" data-map-zoom="out" aria-label="Zoom out">−</button><span class="map-zoom-label">100%</span><button type="button" data-map-zoom="in" aria-label="Zoom in">+</button><button type="button" data-map-zoom="reset" aria-label="Reset zoom">1:1</button></div><div class="map-viewport"><div class="map-canvas"><svg class="route-svg" viewBox="0 0 ${BASE_SIZE} ${BASE_SIZE}" role="img" aria-label="Delivery grid map"><g class="grid-lines">${grid}</g>${roadSvg}<polyline class="route-line depot-route" points="${DEPOT.x * CELL},${DEPOT.y * CELL} ${DEPOT.x * CELL},${DEPOT.y * CELL}"/>${routeSvg}${nodes}<circle class="route-node driver" cx="${DEPOT.x * CELL}" cy="${DEPOT.y * CELL}" r="9"><title>Shipping center · Rd. X10 · Y10</title></circle></svg></div></div><div class="map-legend"><span>Route</span><span>Road</span><span>Stop</span></div></div>`;
-}
-
-export function enableMapPan(container: HTMLElement | null): void {
-  if (!container) return;
-  requestAnimationFrame(() => { container.scrollLeft = (container.scrollWidth - container.clientWidth) / 2; container.scrollTop = (container.scrollHeight - container.clientHeight) / 2; });
-  let dragging = false, x = 0, y = 0, left = 0, top = 0;
-  container.addEventListener('pointerdown', e => { if ((e.target as HTMLElement).closest('.map-controls')) return; dragging = true; x = e.clientX; y = e.clientY; left = container.scrollLeft; top = container.scrollTop; container.classList.add('is-panning'); container.setPointerCapture(e.pointerId); });
-  container.addEventListener('pointermove', e => { if (dragging) { container.scrollLeft = left - (e.clientX - x); container.scrollTop = top - (e.clientY - y); } });
-  container.addEventListener('pointerup', () => { dragging = false; container.classList.remove('is-panning'); });
-}
-
-export function enableMapZoom(container: HTMLElement | null): void {
-  if (!container) return;
-  const canvas = container.querySelector<HTMLElement>('.map-canvas');
-  // The controls are siblings of the viewport, while the canvas is inside it.
-  const controls = container.parentElement || container;
-  const label = controls.querySelector<HTMLElement>('.map-zoom-label');
-  if (!canvas || !label) return;
-  const minimumZoom = () => Math.max(.5, Math.min(1, Math.max(container.clientWidth / BASE_SIZE, container.clientHeight / BASE_SIZE)));
-  const update = () => {
-    const minimum = minimumZoom();
-    sharedZoom = Math.max(minimum, Math.min(2.5, sharedZoom));
-    canvas.style.width = `${BASE_SIZE}px`;
-    canvas.style.height = `${BASE_SIZE}px`;
-    canvas.style.zoom = String(sharedZoom);
-    label.textContent = `${Math.round(sharedZoom * 100)}%`;
-    controls.querySelectorAll<HTMLButtonElement>('[data-map-zoom]').forEach(button => {
-      button.disabled = button.dataset.mapZoom === 'out' && sharedZoom <= minimum;
-    });
-  };
-  controls.querySelectorAll<HTMLButtonElement>('[data-map-zoom]').forEach(button => button.addEventListener('click', () => {
-    const action = button.dataset.mapZoom;
-    sharedZoom = action === 'reset' ? 1 : sharedZoom + (action === 'in' ? .25 : -.25);
-    update();
-  }));
-  update();
+export function routeToPath(route: { path?: { toPickup?: Point[]; toDropoff?: Point[] } } | null | undefined): Point[] {
+  if (!route?.path) return [];
+  return [...(route.path.toPickup ?? []), ...(route.path.toDropoff ?? [])];
 }

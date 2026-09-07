@@ -1,19 +1,105 @@
-import { AppState, Route } from './types';
-import { loadState, saveConfig, loadConfig } from './storage';
-import { planRoutes, buildGraph } from './graph';
-import { loadCloudState, syncRoutes } from './cloud';
-import { renderCoordinateMap, enableMapPan, enableMapZoom, coordinateForOrder } from './map';
+import './app.css';
+import type { User } from './types';
+import { getUser, getToken, setSession, clearSession, post, ApiError } from './api';
+import { esc, toast } from './ui';
+import { renderAdmin } from './views/admin';
+import { renderMerchant } from './views/merchant';
+import { renderDriver } from './views/driver';
+import { renderCustomer } from './views/customer';
 
-let state:AppState=loadState(); let selected=0; const root=document.querySelector<HTMLDivElement>('#view-root')!;
-const esc=(v:unknown):string=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]!));
-const routes=():Route[]=>planRoutes(state); const tag=(v:string,c='')=>`<span class="tag ${c}">${esc(v)}</span>`;
-const head=(k:string,t:string,d:string,a='')=>`<div class="page-heading"><div><p class="eyebrow">${k}</p><h1>${t}</h1><p>${d}</p></div><div class="actions">${a}</div></div>`;
-const notice=(m:string)=>{const e=document.querySelector<HTMLDivElement>('#toast')!;e.textContent=m;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),2200);};
-function map(rs:Route[]):string { return renderCoordinateMap(rs,selected,state.roads); }
-function layout():void {const page=location.hash.slice(1)||'overview';document.querySelectorAll<HTMLElement>('[data-route]').forEach(a=>a.classList.toggle('active',a.dataset.route===page));document.querySelector('#page-kicker')!.textContent=page;root.innerHTML=page==='overview'?overview():page==='routes'?routePage():tablePage(page);bind();}
-function overview():string {const rs=routes(),g=buildGraph(state,rs);return head('Tuesday · 08:42','Good morning, Alex.','Your network is ready for the first delivery wave.','<button class="btn" data-action="refresh">↻ Refresh data</button><button class="btn primary" data-action="generate">Generate routes →</button>')+`<div class="stats-grid"><div class="stat-card"><div class="stat-head"><span>Active routes</span><span class="stat-icon">⌁</span></div><div class="stat-number">${rs.length}</div><div class="stat-trend">↑ 2 from yesterday</div></div><div class="stat-card"><div class="stat-head"><span>Open orders</span><span class="stat-icon">□</span></div><div class="stat-number">${state.orders.length}</div><div class="stat-trend">↑ 8.4% this morning</div></div><div class="stat-card"><div class="stat-head"><span>Fleet ready</span><span class="stat-icon">♧</span></div><div class="stat-number">${state.drivers.filter(d=>d.availability==='Available').length} / ${state.drivers.length}</div><div class="stat-trend neutral">${state.drivers.filter(d=>d.availability==='On route').length} currently on route</div></div><div class="stat-card"><div class="stat-head"><span>Traffic watch</span><span class="stat-icon">≋</span></div><div class="stat-number">${state.traffic.filter(t=>t.status==='Heavy').length}</div><div class="stat-trend warn">Needs attention</div></div></div><div class="grid-2-1"><section class="panel"><div class="panel-title"><div><h2>Network at a glance</h2><p>${g.nodes.length} graph nodes · ${g.edges.length} connections</p></div></div>${map(rs)}</section><section class="panel"><div class="panel-title"><div><h2>Today’s routes</h2><p>${rs.length} routes planned</p></div></div><div class="route-summary">${rs.map((r,i)=>`<div class="route-item ${i===selected?'active':''}" data-route-index="${i}"><i class="route-color" style="background:${r.color}"></i><div><strong>${r.id} · ${esc(r.driver.name)}</strong><span>${r.stops} stops · ${r.distance.toFixed(1)} km · ${r.eta} min</span></div><b>${r.fill}%<small>capacity</small></b></div>`).join('')}</div></section></div>`;}
-function routePage():string {const rs=routes();return head('Workspace / planning','Route board','Select a route to highlight its path.','<button class="btn primary" data-action="generate">Recalculate routes →</button>')+`<div class="route-board"><section class="panel route-list-panel"><div class="route-list-head"><h2>${rs.length} routes planned</h2><p>Capacity and traffic-aware assignments.</p></div><div class="route-list">${rs.map((r,i)=>`<div class="route-card ${i===selected?'active':''}" data-route-index="${i}"><div class="route-card-top"><i style="background:${r.color}"></i><strong>${r.id}</strong><span>${r.fill}% full</span></div><p>${esc(r.driver.name)} · ${esc(r.driver.vehicle)}</p><div class="route-meta"><span><b>${r.stops}</b> stops</span><span><b>${r.distance.toFixed(1)}</b> km</span><span><b>${r.eta}</b> min</span></div></div>`).join('')}</div></section><section class="panel route-map-panel">${map(rs)}</section></div>`;}
-function tablePage(page:string):string {const title=page==='traffic'?'Traffic conditions':page==='orders'?'Customer needs':page==='drivers'?'Driver conditions':'Settings';if(page==='settings'){const c=loadConfig();return head('Workspace / configuration','Settings','Connect Supabase for cloud persistence.')+`<section class="form-card"><h2>Supabase connection</h2><p>Use the public anon key only.</p><form id="settings-form"><div class="field"><label>Project URL</label><input name="url" value="${esc(c.url||'')}" placeholder="https://your-project.supabase.co"/></div><div class="field" style="margin-top:13px"><label>Publishable / anon key</label><input name="anonKey" type="password" value="${esc(c.anonKey||'')}"/></div><div class="form-footer"><button class="btn primary">Save connection</button></div></form></section>`;}const rows=page==='traffic'?state.traffic.map(t=>`<tr><td class="mono">${t.id}</td><td><strong>${esc(t.area)}</strong></td><td>${tag(t.status,t.status==='Heavy'?'red':t.status==='Moderate'?'orange':'green')}</td><td>+${t.delay} min</td><td>${esc(t.source)}</td></tr>`):page==='orders'?state.orders.map((o,index)=>{const coordinate=coordinateForOrder(o,index);return `<tr><td class="mono">${o.id}</td><td><strong>${esc(o.customer)}</strong><br>${esc(o.location)}<br><span class="grid-coordinate">Rd. X${coordinate.x} · Y${coordinate.y}</span></td><td>${esc(o.items)}</td><td class="mono">${esc(o.delivery)}</td><td>${tag(o.priority,o.priority==='Express'?'red':'blue')}</td></tr>`;}):state.drivers.map(d=>`<tr><td><strong>${esc(d.name)}</strong><br><span class="mono">${d.id}</span></td><td>${tag(d.availability,d.availability==='Available'?'green':d.availability==='On route'?'blue':'orange')}</td><td class="mono">${d.load} / ${d.maxLoad}</td><td>${esc(d.position)}</td><td class="mono">${d.maxLoad} units</td></tr>`);const th=page==='traffic'?'<th>Signal</th><th>Area</th><th>Condition</th><th>Delay</th><th>Source</th>':page==='orders'?'<th>Order</th><th>Customer / location</th><th>Items</th><th>Delivery window</th><th>Priority</th>':'<th>Driver</th><th>Availability</th><th>Current load</th><th>Current position</th><th>Maximum load</th>';return head('Inputs',''+title,'Review and manage imported operational data.',`<button class="btn primary" data-action="refresh">Refresh data</button>`)+`<section class="panel"><div class="panel-title"><div><h2>${title}</h2><p>Live workspace data</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr>${th}</tr></thead><tbody>${rows.join('')}</tbody></table></div></section>`;}
-function bind():void {const viewport=document.querySelector<HTMLElement>('.map-viewport');enableMapPan(viewport);enableMapZoom(viewport);document.querySelectorAll<HTMLElement>('[data-route-index]').forEach(e=>e.onclick=()=>{selected=Number(e.dataset.routeIndex);layout();});document.querySelectorAll<HTMLElement>('[data-action]').forEach(e=>e.onclick=()=>{if(e.dataset.action==='generate'){const rs=routes();syncRoutes(rs,buildGraph(state,rs));location.hash='routes';}else{layout();notice('Route graph refreshed.');}});document.querySelector<HTMLFormElement>('#settings-form')?.addEventListener('submit',e=>{e.preventDefault();const form=e.currentTarget as HTMLFormElement;const f=new FormData(form);saveConfig(String(f.get('url')||''),String(f.get('anonKey')||''));notice('Supabase connection saved.');layout();});}
-window.addEventListener('hashchange',layout); layout();
-loadCloudState().then(remoteState=>{state=remoteState;layout();notice('Loaded current data from Supabase.');}).catch(error=>{console.warn(error);notice('Supabase unavailable — showing local fallback data.');});
+const app = document.querySelector<HTMLDivElement>('#app')!;
+let pollTimer: number | undefined;
+
+export function stopPolling(): void {
+  if (pollTimer !== undefined) { window.clearInterval(pollTimer); pollTimer = undefined; }
+}
+export function poll(fn: () => void, ms: number): void {
+  stopPolling();
+  pollTimer = window.setInterval(fn, ms);
+}
+
+const DEMO_ACCOUNTS = [
+  { label: 'Dispatch / Admin', email: 'admin@demo.test' },
+  { label: 'Merchant — Harbor Grocery', email: 'harbor@demo.test' },
+  { label: 'Merchant — North Bakery', email: 'bakery@demo.test' },
+  { label: 'Driver — Jordan Lee', email: 'driver1@demo.test' },
+  { label: 'Driver — Priya Shah', email: 'driver2@demo.test' },
+  { label: 'Driver — Marco Silva', email: 'driver3@demo.test' },
+  { label: 'Driver — Hana Ito', email: 'driver4@demo.test' },
+  { label: 'Driver — Diego Torres', email: 'driver5@demo.test' },
+  { label: 'Customer — Maya Chen', email: 'maya@demo.test' },
+  { label: 'Customer — James Wu', email: 'james@demo.test' },
+];
+
+function loginView(): void {
+  stopPolling();
+  app.innerHTML = `
+    <div class="auth-screen">
+      <div class="auth-card">
+        <div class="brand"><span class="dot"></span><b>Delivery Planner</b></div>
+        <p class="auth-sub">Autonomous multi-agent dispatch</p>
+        <form id="login-form">
+          <label>Email<input name="email" type="email" value="admin@demo.test" autocomplete="username" required></label>
+          <label>Password<input name="password" type="password" value="demo1234" autocomplete="current-password" required></label>
+          <button class="btn primary" type="submit">Sign in</button>
+        </form>
+        <div class="demo-accounts">
+          <p>Quick demo sign-in <small>(password <code>demo1234</code>)</small></p>
+          ${DEMO_ACCOUNTS.map((a) => `<button class="chip-btn" data-email="${esc(a.email)}">${esc(a.label)}</button>`).join('')}
+        </div>
+      </div>
+    </div>`;
+
+  const form = app.querySelector<HTMLFormElement>('#login-form')!;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    await doLogin(String(fd.get('email')), String(fd.get('password')));
+  });
+  app.querySelectorAll<HTMLButtonElement>('.chip-btn').forEach((b) => {
+    b.addEventListener('click', () => doLogin(b.dataset.email!, 'demo1234'));
+  });
+}
+
+async function doLogin(email: string, password: string): Promise<void> {
+  try {
+    const { token, user } = await post<{ token: string; user: User }>('/auth/login', { email, password });
+    setSession(token, user);
+    route();
+  } catch (err) {
+    toast(err instanceof ApiError ? err.message : 'Login failed', 'error');
+  }
+}
+
+function shell(user: User): HTMLElement {
+  app.innerHTML = `
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand"><span class="dot"></span><b>Delivery Planner</b><span class="role-tag">${esc(roleTitle(user.role))}</span></div>
+        <div class="topbar-right">
+          <span class="who">${esc(user.name)}</span>
+          <button id="logout" class="btn ghost">Sign out</button>
+        </div>
+      </header>
+      <main id="view"></main>
+    </div>`;
+  app.querySelector('#logout')!.addEventListener('click', () => { clearSession(); stopPolling(); route(); });
+  return app.querySelector<HTMLElement>('#view')!;
+}
+
+function roleTitle(role: string): string {
+  return { admin: 'Dispatch Control', merchant: 'Merchant', driver: 'Driver', customer: 'Customer' }[role] || role;
+}
+
+function route(): void {
+  stopPolling();
+  const user = getUser();
+  if (!user || !getToken()) { loginView(); return; }
+  const view = shell(user);
+  const renderers: Record<string, (el: HTMLElement, user: User) => void> = {
+    admin: renderAdmin, merchant: renderMerchant, driver: renderDriver, customer: renderCustomer,
+  };
+  (renderers[user.role] ?? (() => { view.innerHTML = '<p>Unknown role</p>'; }))(view, user);
+}
+
+route();

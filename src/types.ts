@@ -1,13 +1,37 @@
-export type Availability = 'Available' | 'On route' | 'Break';
-export type TrafficStatus = 'Clear' | 'Moderate' | 'Heavy';
-export type Priority = 'Standard' | 'Express';
-export type RoadStatus = 'Clear' | 'Moderate' | 'Heavy' | 'Closed';
-export interface TrafficCondition { id:string; area:string; status:TrafficStatus; delay:number; source:string; updated:string; }
-export interface CustomerOrder { id:string; customer:string; location:string; zone:string; items:string; delivery:string; priority:Priority; volume:number; status:string; gridX?:number; gridY?:number; }
-export interface DriverCondition { id:string; name:string; availability:Availability; load:number; position:string; maxLoad:number; vehicle:string; }
-export interface RoadSegment { id:string; startX:number; startY:number; endX:number; endY:number; status:RoadStatus; delay:number; source:string; orientation:'horizontal'|'vertical'; roadGroup:string; }
-export interface AppState { traffic:TrafficCondition[]; orders:CustomerOrder[]; drivers:DriverCondition[]; roads:RoadSegment[]; }
-export interface Route { id:string; driver:DriverCondition; orders:CustomerOrder[]; distance:number; eta:number; stops:number; fill:number; color:string; }
-export interface GraphNode { id:string; type:string; [key:string]:unknown; }
-export interface GraphEdge { from:string; to:string; weight:number; blocked:boolean; }
-export interface Graph { nodes:GraphNode[]; edges:GraphEdge[]; }
+export type Role = 'admin' | 'merchant' | 'driver' | 'customer';
+
+export interface User { id: string; email: string; role: Role; name: string; refId: string | null }
+
+export interface Point { x: number; y: number }
+
+export interface RoadSeg { id: string; ax: number; ay: number; bx: number; by: number; status: 'clear' | 'moderate' | 'heavy' | 'closed'; delay: number }
+
+export interface AgentEvent {
+  id: number; ts: string; agent: string; eventType?: string; event_type?: string;
+  message: string; orderId?: string | null; order_id?: string | null; data?: unknown;
+}
+
+export interface OrderDto {
+  id: string; status: string; priority: string; packageSize: string; volume: number;
+  deadlineTs: string; note: string | null; pickup: Point; dropoff: Point;
+  merchantId?: string; storeId?: string; customerId?: string;
+  items: { name: string; qty: number }[]; createdAt?: string; readyAt?: string | null;
+  delivery?: DeliveryDto | null;
+}
+
+export interface DeliveryDto {
+  id: string; orderId: string; driverId: string | null; status: string;
+  assignedAt: string | null; pickupAt: string | null; deliveredAt: string | null;
+  estimatedDeliveryMinutes: number | null; actualDeliveryMinutes: number | null;
+  etaTs: string | null; routeId: string | null; route?: RouteDto | null;
+}
+
+export interface RouteDto {
+  id: string; origin: Point; distanceKm: number; etaMinutes: number; trafficPenaltyMinutes: number;
+  legs: unknown; path: { toPickup?: Point[]; toDropoff?: Point[] };
+}
+
+export interface DriverDto {
+  id: string; name: string; vehicleType: string; capacity: number; maxPackageSize: string;
+  status: string; currentOrderCount: number; location: Point | null; locationAt: string | null;
+}
