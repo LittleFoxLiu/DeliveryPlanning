@@ -13,15 +13,20 @@ interface DriverDelivery {
 interface Me { location: Point | null; status: string; name: string; vehicleType: string }
 
 let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
+let directory: { id: string; name: string; stores: { id: string; name: string }[] }[] = [];
+let joined: { id: string; name: string; merchant_name: string }[] = [];
+let selectingPosition = false;
 
 export async function renderDriver(el: HTMLElement): Promise<void> {
   resetSig('driver');
   try { grid = await get('/meta/grid'); } catch { /* ignore */ }
+  try { directory = (await get<{ merchants: typeof directory }>('/directory/merchants')).merchants; } catch { /* ignore */ }
+  try { joined = (await get<{ stores: typeof joined }>('/driver/membership')).stores; } catch { /* ignore */ }
   const draw = async () => {
     try {
       const { deliveries, me } = await get<{ deliveries: DriverDelivery[]; me: Me }>('/driver/deliveries');
       const active = deliveries.filter((d) => !['delivered', 'cancelled', 'failed'].includes(d.status));
-      if (!changed('driver', { deliveries, me })) return;
+      if (!changed('driver', { deliveries, me, directory, joined })) return;
       if (patchView(el, view(active, deliveries, me))) wire(el); else resetSig('driver');
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) handleUnauthed();
@@ -66,15 +71,20 @@ function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
       <div class="pill-row">
         <button class="btn ghost" data-status="break">Take a break</button>
         <button class="btn ghost" data-status="available">Go available</button>
+        ${me.status !== 'available' ? `<button class="btn" data-position-start>${selectingPosition ? 'Cancel position selection' : 'Set position on map'}</button>` : ''}
       </div>
     </div>
+    <div class="card"><div class="card-head"><h2>Stores</h2><span class="muted">Join a store to receive its deliveries</span></div>${directory.flatMap((m) => m.stores.map((s) => {
+      const isJoined = joined.some((j) => j.id === s.id);
+      return `<div class="request-row"><span>${esc(m.name)} — ${esc(s.name)}</span>${isJoined ? '<span class="muted">Joined</span>' : `<button class="btn sm" data-store-request="${esc(s.id)}">Request to join</button>`}</div>`;
+    })).join('') || '<p class="muted">No stores available.</p>'}</div>
     <div class="grid2">
       <div>
         ${active.length ? active.map(card).join('') : '<div class="card"><p class="muted">No active deliveries. Sit tight — Dispatch will notify you.</p></div>'}
       </div>
       <div class="card">
         <div class="card-head"><h2>Your route</h2><span class="muted">you are the teal dot</span></div>
-        ${renderMap({ size: grid.size, roads: grid.roads, markers, paths })}
+        ${renderMap({ size: grid.size, roads: grid.roads, markers, paths, selectable: selectingPosition })}
       </div>
     </div>`;
 }
@@ -105,12 +115,54 @@ function card(d: DriverDelivery): string {
 
 function wire(el: HTMLElement): void {
   enableMapTooltips(el);
+  el.querySelector<HTMLButtonElement>('[data-position-start]')?.addEventListener('click', () => {
+    selectingPosition = !selectingPosition;
+    renderDriver(el);
+  });
+  const map = el.querySelector<HTMLElement>('[data-map-selectable="1"]');
+  const svg = map?.querySelector<SVGSVGElement>('svg');
+  const pointForEvent = (event: MouseEvent): { x: number; y: number } | null => {
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    const viewBox = svg.viewBox.baseVal;
+    if (!rect.width || !rect.height) return null;
+    // Convert from the rendered SVG back into grid coordinates, then snap to
+    // an integer x/y so only grid intersections can be selected.
+    const rawX = ((event.clientX - rect.left) / rect.width * viewBox.width + viewBox.x) / (1000 / grid.size);
+    const rawY = ((event.clientY - rect.top) / rect.height * viewBox.height + viewBox.y) / (1000 / grid.size);
+    return { x: Math.max(0, Math.min(grid.size, Math.round(rawX))), y: Math.max(0, Math.min(grid.size, Math.round(rawY))) };
+  };
+  if (svg) svg.addEventListener('mousemove', (event) => {
+    if (!selectingPosition) return;
+    const point = pointForEvent(event);
+    const preview = svg.querySelector<SVGGElement>('[data-position-preview]');
+    if (!point || !preview) return;
+    preview.setAttribute('transform', `translate(${point.x * (1000 / grid.size)} ${point.y * (1000 / grid.size)})`);
+    preview.removeAttribute('hidden');
+  });
+  if (svg) svg.addEventListener('mouseleave', () => svg.querySelector<SVGGElement>('[data-position-preview]')?.setAttribute('hidden', ''));
+  if (svg) svg.addEventListener('click', async (event) => {
+    if (!selectingPosition) return;
+    const point = pointForEvent(event);
+    if (!point) return;
+    const { x, y } = point;
+    try {
+      await post('/driver/location', { lat: x, lng: y });
+      selectingPosition = false;
+      toast(`Position updated to (${x}, ${y})`);
+      renderDriver(el);
+    } catch (err) { toast(err instanceof ApiError ? err.message : 'Position update failed', 'error'); }
+  });
   el.querySelectorAll<HTMLButtonElement>('[data-accept]').forEach((b) => b.addEventListener('click', () =>
     run(() => post(`/driver/deliveries/${b.dataset.accept}/accept`), 'Accepted — navigate to the pickup', el)));
   el.querySelectorAll<HTMLButtonElement>('[data-do]').forEach((b) => b.addEventListener('click', () =>
     run(() => post(`/driver/deliveries/${b.dataset.id}/status`, { action: b.dataset.do }), b.dataset.do === 'delivered' ? 'Delivered!' : 'Pickup confirmed — head to the customer', el)));
-  el.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => b.addEventListener('click', () =>
-    run(() => post('/driver/status', { status: b.dataset.status }), `Status: ${b.dataset.status}`, el)));
+  el.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.status === 'available') selectingPosition = false;
+    run(() => post('/driver/status', { status: b.dataset.status }), `Status: ${b.dataset.status}`, el);
+  }));
+  el.querySelectorAll<HTMLButtonElement>('[data-store-request]').forEach((b) => b.addEventListener('click', () =>
+    run(() => post('/driver/store-request', { storeId: b.dataset.storeRequest }), 'Join request sent', el)));
 }
 
 async function run(fn: () => Promise<unknown>, ok: string, el: HTMLElement): Promise<void> {

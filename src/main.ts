@@ -1,6 +1,6 @@
 import './app.css';
 import type { User } from './types';
-import { getUser, getToken, setSession, clearSession, post, ApiError } from './api';
+import { getUser, getToken, setSession, clearSession, post, get, ApiError } from './api';
 import { esc, toast } from './ui';
 import { renderAdmin } from './views/admin';
 import { renderMerchant } from './views/merchant';
@@ -106,11 +106,20 @@ function loginView(): void {
       <div class="auth-card">
         <div class="brand"><span class="dot"></span><b>Delivery Planner</b></div>
         <p class="auth-sub">Autonomous multi-agent dispatch</p>
+        <div class="auth-tabs"><button class="btn primary" type="button" data-auth-tab="login">Sign in</button><button class="btn ghost" type="button" data-auth-tab="signup">Create account</button></div>
         <form id="login-form">
           <label>Email<input name="email" type="email" value="admin@demo.test" autocomplete="username" required></label>
           <label>Password<input name="password" type="password" value="demo1234" autocomplete="current-password" required></label>
           <button class="btn primary" type="submit">Sign in</button>
         </form>
+        <form id="signup-form" style="display:none">
+          <label>Name<input name="name" type="text" autocomplete="name" required></label>
+          <label>Email<input name="email" type="email" autocomplete="email" required></label>
+          <label>Password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label>
+          <button class="btn primary" type="submit">Create account</button>
+        </form>
+        <div class="oauth-divider">or</div>
+        <a class="btn google-btn" href="/api/auth/google">Continue with Google / Gmail</a>
         <div class="demo-accounts">
           <p>Quick demo sign-in <small>(password <code>demo1234</code>)</small></p>
           ${DEMO_ACCOUNTS.map((a) => `<button class="chip-btn" data-email="${esc(a.email)}">${esc(a.label)}</button>`).join('')}
@@ -119,14 +128,35 @@ function loginView(): void {
     </div>`;
 
   const form = app.querySelector<HTMLFormElement>('#login-form')!;
+  app.querySelectorAll<HTMLButtonElement>('[data-auth-tab]').forEach((b) => b.addEventListener('click', () => {
+    const signup = b.dataset.authTab === 'signup';
+    app.querySelector('#login-form')!.setAttribute('style', signup ? 'display:none' : '');
+    app.querySelector('#signup-form')!.setAttribute('style', signup ? '' : 'display:none');
+  }));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
     await doLogin(String(fd.get('email')), String(fd.get('password')));
   });
+  app.querySelector<HTMLFormElement>('#signup-form')!.addEventListener('submit', async (e) => {
+    e.preventDefault(); const f = e.currentTarget as HTMLFormElement; const fd = new FormData(f);
+    try {
+      const result = await post<{ token: string; user: User; needsOnboarding: boolean }>('/auth/signup', { name: fd.get('name'), email: fd.get('email'), password: fd.get('password') });
+      setSession(result.token, result.user); onboardingView();
+    } catch (err) { toast(err instanceof ApiError ? err.message : 'Account creation failed', 'error'); }
+  });
   app.querySelectorAll<HTMLButtonElement>('.chip-btn').forEach((b) => {
     b.addEventListener('click', () => doLogin(b.dataset.email!, 'demo1234'));
   });
+}
+
+function onboardingView(): void {
+  stopPolling();
+  app.innerHTML = `<div class="auth-screen"><div class="auth-card"><div class="brand"><span class="dot"></span><b>Set up your workspace</b></div><p class="auth-sub">Choose how you will use Delivery Planner.</p><form id="onboarding-form"><label>Account type<select name="role"><option value="customer">Customer</option><option value="merchant">Merchant</option><option value="driver">Driver</option><option value="admin">Admin</option></select></label><div id="role-fields"></div><button class="btn primary" type="submit">Continue</button></form></div></div>`;
+  const form = app.querySelector<HTMLFormElement>('#onboarding-form')!; const fields = app.querySelector('#role-fields')!;
+  const draw = () => { const role = (form.elements.namedItem('role') as HTMLSelectElement).value; fields.innerHTML = role === 'merchant' ? '<label>Business name<input name="businessName" required></label><label>Store name<input name="storeName" required></label><label>Store X<input name="storeLat" type="number" min="0" max="20" value="10" required></label><label>Store Y<input name="storeLng" type="number" min="0" max="20" value="10" required></label>' : role === 'driver' ? '<label>Vehicle<select name="vehicleType"><option>car</option><option>bike</option><option>van</option><option>truck</option></select></label><label>Capacity<input name="capacity" type="number" min="1" max="20" value="4" required></label><label>Starting X<input name="lat" type="number" min="0" max="20" value="10" required></label><label>Starting Y<input name="lng" type="number" min="0" max="20" value="10" required></label>' : '<p class="muted">You can join organizations later from your workspace.</p>'; };
+  form.elements.namedItem('role')!.addEventListener('change', draw); draw();
+  form.addEventListener('submit', async (e) => { e.preventDefault(); const fd = new FormData(form); const body: Record<string, unknown> = {}; fd.forEach((v, k) => { body[k] = v; }); body.capacity = Number(body.capacity); ['lat','lng','storeLat','storeLng'].forEach((k) => { if (body[k] !== undefined) body[k] = Number(body[k]); }); try { const r = await post<{ token: string; user: User }>('/onboarding/role', body); setSession(r.token, r.user); route(); } catch (err) { toast(err instanceof ApiError ? err.message : 'Setup failed', 'error'); } });
 }
 
 async function doLogin(email: string, password: string): Promise<void> {
@@ -170,4 +200,12 @@ function route(): void {
   (renderers[user.role] ?? (() => { view.innerHTML = '<p>Unknown role</p>'; }))(view, user);
 }
 
-route();
+const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+const oauthToken = hash.get('auth_token');
+const oauthNew = hash.get('new') === '1';
+if (oauthToken) {
+  history.replaceState(null, '', location.pathname + location.search);
+  setSession(oauthToken, { id: '', email: '', role: 'customer', name: 'Google user', refId: null });
+  get<{ user: User }>('/auth/me').then(({ user }) => { setSession(oauthToken, user); oauthNew ? onboardingView() : route(); }).catch(() => { clearSession(); loginView(); });
+} else if (hash.get('auth_error')) { history.replaceState(null, '', location.pathname + location.search); loginView(); toast(hash.get('auth_error')!, 'error'); }
+else route();

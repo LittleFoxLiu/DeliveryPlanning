@@ -34,6 +34,13 @@ code { background: #eef0f4; padding: 1px 5px; border-radius: 5px; font-size: .9e
 .chip-btn { display: block; width: 100%; text-align: left; margin-bottom: 6px; padding: 8px 11px;
   border: 1px solid var(--line); border-radius: 9px; background: var(--card); cursor: pointer; font: inherit; }
 .chip-btn:hover { background: #faf3f1; border-color: var(--accent); }
+.auth-tabs { display:flex; gap:8px; margin-bottom:14px; }
+.oauth-divider { text-align:center; color:var(--muted); margin:14px 0 8px; }
+.google-btn { display:block; text-align:center; text-decoration:none; }
+.request-row { display:flex; justify-content:space-between; gap:12px; padding:9px 0; border-top:1px solid var(--line); align-items:center; }
+.map-selectable .grid-map { cursor: crosshair; outline: 2px dashed var(--accent); outline-offset: -2px; }
+.road-sim-btn { background: #e0a52f; border-color: #e0a52f; color: #fff; }
+.road-sim-btn:hover { background: #c88c18; border-color: #c88c18; }
 
 /* shell */
 .shell { min-height: 100vh; display: flex; flex-direction: column; }

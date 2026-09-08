@@ -18,6 +18,7 @@ export interface MapInput {
   roads: RoadSeg[];
   markers: MapMarker[];
   paths: MapPath[];
+  selectable?: boolean;
 }
 
 const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, (c) => (
@@ -28,7 +29,7 @@ const KIND_COLOR: Record<MapMarker['kind'], string> = {
   pickup: '#f1c75b', dropoff: '#5277d7', driver: '#159c99', depot: '#98a2b3',
 };
 
-export function renderMap({ size, roads, markers, paths }: MapInput): string {
+export function renderMap({ size, roads, markers, paths, selectable = false }: MapInput): string {
   const cell = BASE / (size || 20);
   const p = (n: number) => (n * cell).toFixed(1);
   const ok = (q: { x: number; y: number }) => Number.isFinite(q.x) && Number.isFinite(q.y);
@@ -65,10 +66,11 @@ export function renderMap({ size, roads, markers, paths }: MapInput): string {
       + `<title>${esc(heading)} — ${esc(lines.join(' · '))}</title></circle></g>`;
   }).join('');
 
-  return `<div class="map-wrap">
+  return `<div class="map-wrap${selectable ? ' map-selectable' : ''}"${selectable ? ' data-map-selectable="1"' : ''}>
     <svg viewBox="-20 -20 ${BASE + 40} ${BASE + 40}" class="grid-map" role="img" aria-label="Delivery grid">
       <g class="grid-lines" stroke="#e7e9ed" stroke-width="1">${grid}</g>
       ${roadSvg}${pathSvg}${markerSvg}
+      ${selectable ? '<g class="position-preview" data-position-preview hidden><circle r="13" fill="#f26249" opacity=".22"/><circle r="7" fill="#f26249" stroke="#fff" stroke-width="2"/><text y="-14" text-anchor="middle" fill="#d64b34" font-size="18" font-weight="700">preview</text></g>' : ''}
     </svg>
     <div class="map-tip" hidden></div>
     <div class="map-key">

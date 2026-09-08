@@ -58,6 +58,34 @@ CREATE TABLE IF NOT EXISTS driver_locations (
 );
 CREATE INDEX IF NOT EXISTS idx_driver_locations_driver ON driver_locations(driver_id, id DESC);
 
+CREATE TABLE IF NOT EXISTS admin_invites (
+  admin_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  invite_code text NOT NULL UNIQUE,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS merchant_admins (
+  merchant_id text PRIMARY KEY REFERENCES merchants(id) ON DELETE CASCADE,
+  admin_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS driver_stores (
+  driver_id text NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+  store_id text NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (driver_id, store_id)
+);
+CREATE TABLE IF NOT EXISTS join_requests (
+  id text PRIMARY KEY,
+  requester_user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind text NOT NULL CHECK (kind IN ('merchant_admin','driver_store')),
+  target_admin_id text REFERENCES users(id) ON DELETE CASCADE,
+  target_store_id text REFERENCES stores(id) ON DELETE CASCADE,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','rejected')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  decided_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_join_requests_target ON join_requests(target_admin_id, target_store_id, status);
+
 CREATE TABLE IF NOT EXISTS orders (
   id text PRIMARY KEY,
   merchant_id text NOT NULL REFERENCES merchants(id),
@@ -168,6 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_events_id ON agent_events(id DESC);
 
 /** Tables in dependency order (parents first) — used for TRUNCATE in tests. */
 export const TABLES = [
+  'join_requests', 'driver_stores', 'merchant_admins', 'admin_invites',
   'agent_events', 'assignments', 'routes', 'deliveries', 'order_items', 'orders',
   'driver_locations', 'driver_status', 'drivers', 'customers', 'stores', 'merchants',
   'road_segments', 'traffic_conditions', 'users',

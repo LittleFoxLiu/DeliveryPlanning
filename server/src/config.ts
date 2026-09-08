@@ -81,6 +81,11 @@ export const config = {
   databaseUrl: resolveDatabaseUrl(),
   dbFile: process.env.DB_FILE?.trim() || 'server/data/pgdata',
   authSecret: readSecret(),
+  google: {
+    clientId: process.env.GOOGLE_CLIENT_ID?.trim() || '',
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || '',
+    redirectUri: process.env.GOOGLE_REDIRECT_URI?.trim() || 'http://localhost:8787/api/auth/google/callback',
+  },
   tokenTtlSeconds: 60 * 60 * 12,
   // Monitoring loop cadence. 0 disables the background loop (tests / manual mode).
   monitorIntervalMs: Number(process.env.MONITOR_INTERVAL_MS ?? 0),

@@ -13,18 +13,20 @@ interface OrderDetail {
 
 let selected: string | null = null;
 let stores: { id: string; name: string; pickup: { x: number; y: number } }[] = [];
+let membership: { requests: { id: string; name: string; email: string; store_name: string; status: string }[] } = { requests: [] };
 
 export async function renderMerchant(el: HTMLElement): Promise<void> {
   resetSig('merchant');
   try { stores = (await get<{ stores: typeof stores }>('/merchant/stores')).stores; } catch { /* ignore */ }
+  try { membership = await get<typeof membership>('/merchant/membership'); } catch { /* ignore */ }
   const draw = async () => {
     try {
       const { orders } = await get<MerchantOrders>('/merchant/orders');
       if (!selected && orders.length) selected = orders[0].id;
       let detail: OrderDetail | null = null;
       if (selected) { try { detail = await get<OrderDetail>(`/merchant/orders/${selected}`); } catch { detail = null; } }
-      if (!changed('merchant', { orders, detail, selected })) return;
-      if (patchView(el, view(orders, detail))) wire(el, orders); else resetSig('merchant');
+      if (!changed('merchant', { orders, detail, selected, membership })) return;
+      if (patchView(el, view(orders, detail, membership))) wire(el, orders); else resetSig('merchant');
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) handleUnauthed();
     }
@@ -33,9 +35,11 @@ export async function renderMerchant(el: HTMLElement): Promise<void> {
   poll(draw, 4000);
 }
 
-function view(orders: OrderDto[], detail: OrderDetail | null): string {
+function view(orders: OrderDto[], detail: OrderDetail | null, membership: { requests: { id: string; name: string; email: string; store_name: string; status: string }[] }): string {
   return `
     <div class="page-head"><div><h1>Merchant workspace</h1><p>Mark orders ready — the agents handle dispatch.</p></div></div>
+    <div class="card"><div class="card-head"><h2>Join an admin</h2></div><form class="inline-form" id="admin-request"><label>Admin invite code<input name="inviteCode" placeholder="ADMIN-XXXXXXXX" required></label><button class="btn" type="submit">Request control</button></form><p class="muted">Requests are visible to that admin for approval.</p></div>
+    <div class="card"><div class="card-head"><h2>Driver join requests</h2></div>${membership.requests.length ? membership.requests.map((r) => `<div class="request-row"><span>${esc(r.name)} · ${esc(r.email)} · ${esc(r.store_name)}</span>${r.status === 'pending' ? `<span><button class="btn sm" data-driver-join="${esc(r.id)}" data-accept="true">Accept</button> <button class="btn sm" data-driver-join="${esc(r.id)}" data-accept="false">Reject</button></span>` : esc(r.status)}</div>`).join('') : '<p class="muted">No driver requests.</p>'}</div>
     <div class="grid2">
       <div>
         <div class="card">
@@ -126,6 +130,8 @@ function wire(el: HTMLElement, orders: OrderDto[]): void {
     } catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); b.disabled = false; }
   }));
   const form = el.querySelector<HTMLFormElement>('#new-order');
+  el.querySelector<HTMLFormElement>('#admin-request')?.addEventListener('submit', async (e) => { e.preventDefault(); const fd = new FormData(e.currentTarget as HTMLFormElement); try { await post('/merchant/admin-request', { inviteCode: fd.get('inviteCode') }); toast('Request sent'); renderMerchant(el); } catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); } });
+  el.querySelectorAll<HTMLButtonElement>('[data-driver-join]').forEach((b) => b.addEventListener('click', async () => { try { await post(`/merchant/membership/${b.dataset.driverJoin}`, { accept: b.dataset.accept === 'true' }); toast('Request updated'); renderMerchant(el); } catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); } }));
   form?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(form);

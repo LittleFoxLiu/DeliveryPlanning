@@ -1,11 +1,12 @@
 import { Router, type Request } from 'express';
+import { createHmac, randomBytes } from 'node:crypto';
 import { config } from './config.js';
 import { authenticate, requireRole, hashPassword, verifyPassword, issueToken, type AuthUser } from './auth.js';
 import { rateLimit, h } from './http.js';
 import { badRequest, forbidden, notFound, conflict, HttpError } from './util.js';
 import { asObject, str, enumVal, int, coord, futureTs, idParam } from './validation.js';
 import {
-  users, merchants, stores, customers, drivers, orders, deliveries, roads, traffic,
+  users, merchants, stores, customers, drivers, orders, deliveries, roads, traffic, memberships,
 } from './repo.js';
 import { listEvents, bus } from './events.js';
 import { coordinator } from './agents/coordinator.js';
@@ -37,7 +38,7 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw badRequest('Invalid email');
   const password = str(b, 'password', { min: 8, max: 200 });
   const name = str(b, 'name', { min: 1, max: 120 });
-  const role = enumVal(b, 'role', ['merchant', 'customer', 'driver'] as const);
+  const role = enumVal(b, 'role', ['merchant', 'customer', 'driver'] as const, 'customer');
   if (await users.byEmail(email)) throw conflict('Email already registered');
 
   const { hash, salt } = hashPassword(password);
@@ -66,7 +67,7 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
 
   const row = await users.create({ email, passwordHash: hash, passwordSalt: salt, role, name, refId });
   const user: AuthUser = { id: row.id, email: row.email, role: row.role, name: row.name, refId: row.ref_id };
-  res.status(201).json({ token: issueToken(user), user: publicUser(user) });
+  res.status(201).json({ token: issueToken(user), user: publicUser(user), needsOnboarding: true });
 }));
 
 api.post('/auth/login', authLimiter, h(async (req, res) => {
@@ -81,7 +82,79 @@ api.post('/auth/login', authLimiter, h(async (req, res) => {
   res.json({ token: issueToken(user), user: publicUser(user) });
 }));
 
+function oauthState(): string {
+  const payload = Buffer.from(JSON.stringify({ exp: Date.now() + 10 * 60_000, nonce: randomBytes(16).toString('hex') })).toString('base64url');
+  const sig = createHmac('sha256', config.authSecret).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+function validOauthState(state: string): boolean {
+  const [payload, sig] = state.split('.');
+  if (!payload || !sig) return false;
+  const expected = createHmac('sha256', config.authSecret).update(payload).digest('base64url');
+  if (sig !== expected) return false;
+  try { return JSON.parse(Buffer.from(payload, 'base64url').toString()).exp > Date.now(); } catch { return false; }
+}
+
+api.get('/auth/google', (_req, res) => {
+  if (!config.google.clientId || !config.google.clientSecret) return res.status(503).json({ message: 'Google sign-in is not configured' });
+  const u = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  u.searchParams.set('client_id', config.google.clientId); u.searchParams.set('redirect_uri', config.google.redirectUri);
+  u.searchParams.set('response_type', 'code'); u.searchParams.set('scope', 'openid email profile'); u.searchParams.set('state', oauthState());
+  res.redirect(u.toString());
+});
+api.get('/auth/google/callback', async (req, res) => {
+  const fail = (message: string) => res.redirect(`/#auth_error=${encodeURIComponent(message)}`);
+  try {
+    if (!config.google.clientId || !config.google.clientSecret) return fail('Google sign-in is not configured');
+    if (typeof req.query.state !== 'string' || !validOauthState(req.query.state)) return fail('Invalid or expired Google sign-in request');
+    if (typeof req.query.code !== 'string') return fail('Google sign-in was cancelled');
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code: req.query.code, client_id: config.google.clientId, client_secret: config.google.clientSecret, redirect_uri: config.google.redirectUri, grant_type: 'authorization_code' }) });
+    if (!tokenRes.ok) return fail('Google sign-in could not be completed');
+    const token = await tokenRes.json() as { access_token?: string };
+    if (!token.access_token) return fail('Google did not return an access token');
+    const profileRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${token.access_token}` } });
+    if (!profileRes.ok) return fail('Could not read Google account');
+    const profile = await profileRes.json() as { email?: string; email_verified?: boolean; name?: string };
+    if (!profile.email || profile.email_verified !== true) return fail('A verified Google email is required');
+    let row = await users.byEmail(profile.email);
+    let isNew = false;
+    if (!row) {
+      isNew = true;
+      const p = hashPassword(randomBytes(32).toString('hex'));
+      const customer = await customers.create(profile.name || profile.email.split('@')[0]);
+      row = await users.create({ email: profile.email, passwordHash: p.hash, passwordSalt: p.salt, role: 'customer', name: profile.name || profile.email, refId: customer.id });
+    }
+    const user: AuthUser = { id: row.id, email: row.email, role: row.role, name: row.name, refId: row.ref_id };
+    return res.redirect(`/#auth_token=${encodeURIComponent(issueToken(user))}&new=${isNew ? '1' : '0'}`);
+  } catch { return fail('Google sign-in failed'); }
+});
 api.get('/auth/me', authenticate(true), (req, res) => res.json({ user: publicUser(req.user!) }));
+
+/* ------------------------------------------------------------- onboarding */
+api.post('/onboarding/role', authenticate(true), authLimiter, h(async (req, res) => {
+  const b = asObject(req.body);
+  const role = enumVal(b, 'role', ['admin', 'merchant', 'driver', 'customer'] as const);
+  const current = await users.byId(req.user!.id);
+  if (!current) throw notFound('Account not found');
+  let refId = current.ref_id;
+  if (role === 'merchant') {
+    const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
+    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: coord(b, 'storeLat'), pickupLng: coord(b, 'storeLng') });
+    refId = merchant.id;
+  } else if (role === 'driver') {
+    const driver = await drivers.create({
+      name: current.name, vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
+      capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }), maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
+      lat: coord(b, 'lat'), lng: coord(b, 'lng'), status: 'available',
+    });
+    refId = driver.id;
+  } else if (role === 'customer') {
+    if (!refId) refId = (await customers.create(current.name)).id;
+  } else refId = null;
+  const updated = await users.setRole(req.user!.id, role, refId);
+  const user: AuthUser = { id: updated!.id, email: updated!.email, role: updated!.role, name: updated!.name, refId: updated!.ref_id };
+  res.json({ token: issueToken(user), user: publicUser(user) });
+}));
 
 function publicUser(u: AuthUser) {
   return { id: u.id, email: u.email, role: u.role, name: u.name, refId: u.refId };
@@ -315,12 +388,45 @@ api.post('/driver/status', ...driverOnly, h(async (req, res) => {
 
 api.post('/driver/location', ...driverOnly, h(async (req, res) => {
   const b = asObject(req.body);
-  await drivers.recordLocation(req.user!.refId!, coord(b, 'lat'), coord(b, 'lng'));
+  const driver = await drivers.byId(req.user!.refId!);
+  if (!driver) throw notFound('Driver profile not found');
+  if (driver.status === 'available') throw conflict('Set your status to break or offline before changing your position');
+  const lat = coord(b, 'lat');
+  const lng = coord(b, 'lng');
+  if (!Number.isInteger(lat) || !Number.isInteger(lng)) throw badRequest('Position must be on a grid intersection');
+  await drivers.recordLocation(req.user!.refId!, lat, lng);
   res.json({ ok: true });
 }));
 
 /* --------------------------------------------------------------- admin */
 const adminOnly = [authenticate(true), requireRole('admin')];
+
+/* ------------------------------------------------------------- memberships */
+api.get('/admin/membership', ...adminOnly, h(async (req, res) => {
+  res.json({ inviteCode: await memberships.inviteForAdmin(req.user!.id), requests: await memberships.adminRequests(req.user!.id) });
+}));
+api.post('/admin/membership/:id', ...adminOnly, h(async (req, res) => {
+  await memberships.decideAdminRequest(req.user!.id, idParam(req.params.id, 'request id'), req.body?.accept === true);
+  res.json({ ok: true });
+}));
+api.post('/merchant/admin-request', ...merchantOnly, h(async (req, res) => {
+  await memberships.requestMerchantAdmin(req.user!.id, str(asObject(req.body), 'inviteCode', { min: 4, max: 80 }));
+  res.json({ ok: true });
+}));
+api.get('/merchant/membership', ...merchantOnly, h(async (req, res) => {
+  res.json({ requests: await memberships.merchantRequests(req.user!.refId!) });
+}));
+api.post('/merchant/membership/:id', ...merchantOnly, h(async (req, res) => {
+  await memberships.decideDriverRequest(req.user!.refId!, idParam(req.params.id, 'request id'), req.body?.accept === true);
+  res.json({ ok: true });
+}));
+api.post('/driver/store-request', ...driverOnly, h(async (req, res) => {
+  await memberships.requestDriverStore(req.user!.id, idParam(String(asObject(req.body).storeId), 'store id'));
+  res.json({ ok: true });
+}));
+api.get('/driver/membership', ...driverOnly, h(async (req, res) => {
+  res.json({ stores: await memberships.storesForDriver(req.user!.refId!) });
+}));
 
 api.get('/admin/overview', ...adminOnly, h(async (_req, res) => {
   const [activeOrders, allDrivers, activeDeliveries, trafficRows, roadRows, events] = await Promise.all([
@@ -337,6 +443,16 @@ api.get('/admin/overview', ...adminOnly, h(async (_req, res) => {
     events,
     llmEnabled: config.llm.enabled,
   });
+}));
+
+api.post('/admin/roads/randomize', ...adminOnly, h(async (_req, res) => {
+  const statuses = ['clear', 'moderate', 'heavy', 'closed'] as const;
+  const segments = await roads.all();
+  for (const segment of segments) {
+    const status = statuses[Math.floor(Math.random() * statuses.length)];
+    await roads.setStatus(segment.id, status, status === 'clear' ? 0 : status === 'moderate' ? 4 : status === 'heavy' ? 10 : 0);
+  }
+  res.json({ updated: segments.length });
 }));
 
 api.get('/admin/orders', ...adminOnly, h(async (_req, res) => {

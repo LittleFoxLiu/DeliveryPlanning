@@ -44,6 +44,14 @@ Everyone who sets the same `DATABASE_URL` now shares one database. The browser
 never touches Supabase — only the server does, so the connection string stays
 server-side. The service_role / publishable API keys are **not** used.
 
+### Google / Gmail sign-in
+
+Create a Google Cloud OAuth **Web application**, add
+`http://localhost:8787/api/auth/google/callback` as an authorized redirect URI,
+and set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`. New Google
+accounts are created as customers and are sent through the role-onboarding page.
+Google sign-in is disabled until both values are configured.
+
 Tests always run against a private in-process Postgres regardless of
 `DATABASE_URL`.
 

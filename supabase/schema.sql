@@ -60,6 +60,35 @@ create table if not exists public.driver_locations (
 create index if not exists idx_driver_locations_driver
   on public.driver_locations(driver_id, id desc);
 
+create table if not exists public.admin_invites (
+  admin_id text primary key references public.users(id) on delete cascade,
+  invite_code text not null unique,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.merchant_admins (
+  merchant_id text primary key references public.merchants(id) on delete cascade,
+  admin_id text not null references public.users(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.driver_stores (
+  driver_id text not null references public.drivers(id) on delete cascade,
+  store_id text not null references public.stores(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (driver_id, store_id)
+);
+create table if not exists public.join_requests (
+  id text primary key,
+  requester_user_id text not null references public.users(id) on delete cascade,
+  kind text not null check (kind in ('merchant_admin','driver_store')),
+  target_admin_id text references public.users(id) on delete cascade,
+  target_store_id text references public.stores(id) on delete cascade,
+  status text not null default 'pending' check (status in ('pending','accepted','rejected')),
+  created_at timestamptz not null default now(),
+  decided_at timestamptz
+);
+create index if not exists idx_join_requests_target
+  on public.join_requests(target_admin_id, target_store_id, status);
+
 create table if not exists public.orders (
   id text primary key,
   merchant_id text not null references public.merchants(id),
