@@ -3,6 +3,8 @@ import { hashPassword } from './auth.js';
 import { users, merchants, stores, customers, drivers, orders, roads, traffic } from './repo.js';
 import { buildRoadGrid } from './engine/routing.js';
 import { minutesFromNow } from './util.js';
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD || 'demo1234';
 
@@ -82,7 +84,7 @@ async function mkUser(email: string, role: 'admin' | 'merchant' | 'driver' | 'cu
   await users.create({ email, passwordHash: hash, passwordSalt: salt, role, name, refId });
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
 if (isMain) {
   seed({ reset: process.argv.includes('--reset') })
     .then(() => { console.log('[seed] done'); return closeDb(); })

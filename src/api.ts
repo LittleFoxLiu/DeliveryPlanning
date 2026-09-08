@@ -27,11 +27,17 @@ export async function api<T = unknown>(
   const headers: Record<string, string> = { 'content-type': 'application/json', ...extraHeaders };
   const token = getToken();
   if (token) headers.authorization = `Bearer ${token}`;
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new ApiError(0, `Unable to reach the API server. Start it with "npm run dev". (${detail})`);
+  }
   const text = await res.text();
   let json: unknown = null;
   try { json = text ? JSON.parse(text) : null; } catch { json = { message: text }; }

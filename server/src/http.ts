@@ -45,7 +45,13 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
     return res.status(409).json({ error: 'conflict', message });
   }
   console.error('[api] unhandled', req.method, req.path, err);
-  res.status(500).json({ error: 'internal', message: 'Internal server error' });
+  // Keep production responses generic, but make local failures diagnosable.
+  // The previous response discarded the actual database/route exception and
+  // made every server-side problem look identical in the browser.
+  const detail = process.env.NODE_ENV === 'production'
+    ? 'Internal server error'
+    : `Internal server error: ${message}`;
+  res.status(500).json({ error: 'internal', message: detail });
 }
 
 /** Wrap async handlers so rejections reach errorHandler on Express 4 & 5. */

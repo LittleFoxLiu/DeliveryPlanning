@@ -5,6 +5,8 @@ import { api } from './api.js';
 import { rateLimit, notFoundHandler, errorHandler } from './http.js';
 import { coordinator } from './agents/coordinator.js';
 import { seed } from './seed.js';
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 
 export function createApp() {
   const app = express();
@@ -22,7 +24,10 @@ export function createApp() {
   return app;
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+// Compare normalized filesystem paths. Comparing import.meta.url directly to
+// `file://${process.argv[1]}` fails on Windows because the URL is formatted as
+// file:///C:/..., so the API startup block would never execute there.
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
 if (isMain) {
   (async () => {
     await initDb();
