@@ -6,6 +6,7 @@ import {
 import { emitAgentEvent } from '../events.js';
 import { nowIso, minutesFromNow, conflict } from '../util.js';
 import { scoreDriver, compareAssignments, type ScoreBreakdown } from '../engine/scoring.js';
+import { explainAssignment } from './llm.js';
 import type { RoutedCandidate } from './routingAgent.js';
 
 const NAME = 'DispatchAgent';
@@ -240,17 +241,37 @@ export const dispatchAgent = {
     }
 
     const winner = comparison.winner;
+    const nameById = new Map(routed.map((r) => [r.candidate.driver.id, r.candidate.driver.name]));
+    const nameOf = (idv: string) => nameById.get(idv) ?? idv;
+    const orderCode = `#${order.id.replace(/^ord_/, '').slice(-6).toUpperCase()}`;
+
     await emitAgentEvent({
       cycleId, agent: NAME, eventType: result.reused ? 'assignment_reused' : 'driver_assigned',
       orderId: order.id, deliveryId: result.deliveryId, driverId: winner.driverId,
       message: result.reused
-        ? `Assignment for order ${order.id} already in place (idempotent) → ${winner.driverId}`
-        : `Selected ${winner.driverId} for order ${order.id} — score ${winner.score}. `
-          + winner.explanation.join(' · '),
+        ? `Assignment for ${orderCode} already in place (idempotent) → ${nameOf(winner.driverId)}`
+        : `Selected ${nameOf(winner.driverId)} for ${orderCode} — score ${winner.score}. ` + winner.explanation.join(' · '),
       data: reasoning,
     });
 
+    // LLM writes the human explanation as a follow-up so it never delays the
+    // assignment itself. Deterministic content is already on the event above.
     if (!result.reused) {
+      const runnerUp = comparison.ranked.filter((b) => b.eligible && b.driverId !== winner.driverId)[0];
+      void explainAssignment({
+        orderCode,
+        winner: { name: nameOf(winner.driverId), score: winner.score, factors: winner.factors as unknown as Record<string, unknown>, contributions: winner.contributions },
+        runnerUp: runnerUp ? { name: nameOf(runnerUp.driverId), score: runnerUp.score } : null,
+        rejected: comparison.ranked.filter((b) => !b.eligible).map((b) => ({ name: nameOf(b.driverId), reasons: b.disqualifiers })),
+      }).then(async (ex) => {
+        if (ex.source === 'llm') {
+          await emitAgentEvent({
+            cycleId, agent: NAME, eventType: 'assignment_explained', orderId: order.id, deliveryId: result.deliveryId, driverId: winner.driverId,
+            message: ex.text, data: { source: 'llm' },
+          });
+        }
+      }).catch(() => undefined);
+
       await dispatchTools.notify_driver(winner.driverId, order.id, result.deliveryId, cycleId, winner.factors.totalDeliveryMin);
     }
 

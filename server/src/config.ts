@@ -23,6 +23,35 @@ function resolveDatabaseUrl(): string {
   return raw;
 }
 
+export type LlmConfig =
+  | { enabled: false }
+  | { enabled: true; provider: 'gateway' | 'anthropic'; url: string; apiKey: string; model: string; timeoutMs: number };
+
+function resolveLlm(): LlmConfig {
+  const gwUrl = process.env.LLM_GATEWAY_URL?.trim();
+  const gwKey = process.env.LLM_GATEWAY_API_KEY?.trim();
+  if (gwUrl && gwKey) {
+    return {
+      enabled: true, provider: 'gateway',
+      url: gwUrl.replace(/\/$/, ''),
+      apiKey: gwKey,
+      model: process.env.LLM_MODEL?.trim() || 'sonnet4.5:latest',
+      timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 8000),
+    };
+  }
+  const anthKey = process.env.ANTHROPIC_API_KEY?.trim();
+  if (anthKey) {
+    return {
+      enabled: true, provider: 'anthropic',
+      url: (process.env.ANTHROPIC_BASE_URL?.trim() || 'https://api.anthropic.com').replace(/\/$/, ''),
+      apiKey: anthKey,
+      model: process.env.AGENT_MODEL?.trim() || 'claude-sonnet-5',
+      timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 8000),
+    };
+  }
+  return { enabled: false };
+}
+
 function readSecret(): string {
   const fromEnv = process.env.AUTH_SECRET?.trim();
   if (fromEnv && fromEnv.length >= 16) return fromEnv;
@@ -55,13 +84,9 @@ export const config = {
   tokenTtlSeconds: 60 * 60 * 12,
   // Monitoring loop cadence. 0 disables the background loop (tests / manual mode).
   monitorIntervalMs: Number(process.env.MONITOR_INTERVAL_MS ?? 0),
-  // Optional LLM advisory layer. Disabled unless a key is present.
-  llm: {
-    enabled: !!process.env.ANTHROPIC_API_KEY,
-    apiKey: process.env.ANTHROPIC_API_KEY ?? '',
-    model: process.env.AGENT_MODEL?.trim() || 'claude-sonnet-5',
-    baseUrl: process.env.ANTHROPIC_BASE_URL?.trim() || 'https://api.anthropic.com',
-  },
+  // Optional LLM reasoning layer. Provider auto-selected from env; disabled when
+  // neither is configured (the app stays fully deterministic).
+  llm: resolveLlm(),
   grid: { size: 20, segmentBaseMinutes: 2, kmPerSegment: 0.5 },
   rateLimit: {
     windowMs: 60_000,

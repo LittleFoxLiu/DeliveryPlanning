@@ -50,7 +50,7 @@ export const driverAgent = {
    *  location availability, capacity, vehicle compatibility, and current
    *  assignments. Does NOT consider "closest" — that is the Dispatch Agent's
    *  multi-factor decision. */
-  async findCandidates(order: OrderRow, cycleId: string, excludeDriverIds: string[] = []): Promise<CandidateResult> {
+  async findCandidates(order: OrderRow, cycleId: string, excludeDriverIds: string[] = [], quiet = false): Promise<CandidateResult> {
     const all = await driverTools.get_all_drivers();
     const candidates: Candidate[] = [];
     const rejected: CandidateResult['rejected'] = [];
@@ -82,15 +82,17 @@ export const driverAgent = {
       }
     }
 
-    await emitAgentEvent({
-      cycleId, agent: NAME, eventType: 'candidates_found', orderId: order.id,
-      message: `Found ${candidates.length} eligible driver${candidates.length === 1 ? '' : 's'} `
-        + `(${rejected.length} filtered out) for order ${order.id}`,
-      data: {
-        eligible: candidates.map((c) => ({ driverId: c.driver.id, name: c.driver.name, headroom: c.headroom })),
-        rejected,
-      },
-    });
+    if (!quiet) {
+      await emitAgentEvent({
+        cycleId, agent: NAME, eventType: 'candidates_found', orderId: order.id,
+        message: `Found ${candidates.length} eligible driver${candidates.length === 1 ? '' : 's'} `
+          + `(${rejected.length} filtered out) for order ${order.id}`,
+        data: {
+          eligible: candidates.map((c) => ({ driverId: c.driver.id, name: c.driver.name, headroom: c.headroom })),
+          rejected,
+        },
+      });
+    }
     return { candidates, rejected };
   },
 };

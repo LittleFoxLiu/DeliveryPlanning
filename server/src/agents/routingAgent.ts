@@ -47,7 +47,7 @@ export const routingAgent = {
 
   /** Calculate the authoritative driver → pickup → customer route + ETA for
    *  every candidate. Traffic and closed roads are baked into the grid costs. */
-  async computeCandidateRoutes(order: OrderRow, candidates: Candidate[], cycleId: string): Promise<RoutedCandidate[]> {
+  async computeCandidateRoutes(order: OrderRow, candidates: Candidate[], cycleId: string, quiet = false): Promise<RoutedCandidate[]> {
     const segs: Segment[] = await roads.segments();
     const pickup: Point = { x: order.pickup_lat, y: order.pickup_lng };
     const dropoff: Point = { x: order.delivery_lat, y: order.delivery_lng };
@@ -63,7 +63,7 @@ export const routingAgent = {
       })),
     );
 
-    await emitAgentEvent({
+    if (!quiet) await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'routes_calculated', orderId: order.id,
       message: `Calculated ${routed.length} candidate route${routed.length === 1 ? '' : 's'} for order ${order.id}`,
       data: {

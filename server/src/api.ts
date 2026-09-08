@@ -17,7 +17,10 @@ import {
 export const api = Router();
 
 /* ------------------------------------------------------------------ health */
-api.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString(), llm: config.llm.enabled }));
+api.get('/health', (_req, res) => res.json({
+  ok: true, ts: new Date().toISOString(),
+  llm: config.llm.enabled ? { enabled: true, provider: config.llm.provider, model: config.llm.model } : { enabled: false },
+}));
 api.get('/meta/grid', authenticate(true), h(async (_req, res) => {
   res.json({
     size: config.grid.size,

@@ -36,7 +36,7 @@ if (isMain) {
     const server = app.listen(config.port, () => {
       console.log(`[delivery-planner] API on http://localhost:${config.port}`);
       console.log(`[delivery-planner] database: ${dbKind() === 'postgres' ? 'Supabase/Postgres (shared)' : `PGlite (local: ${config.dbFile})`}`);
-      console.log(`[delivery-planner] llm advisory: ${config.llm.enabled ? 'on' : 'off'}`);
+      console.log(`[delivery-planner] llm reasoning: ${config.llm.enabled ? `on (${config.llm.provider}, ${config.llm.model})` : 'off — deterministic only'}`);
     });
 
     if (config.monitorIntervalMs > 0) {

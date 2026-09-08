@@ -146,14 +146,25 @@ Agent     Agent   Agent   Agent     Agent
 - **`engine/stateMachine.ts`** — legal order/delivery transitions; terminal
   states can't be resurrected.
 
-### LLM advisory layer (`agents/llm.ts`)
+### LLM reasoning layer (`agents/llm.ts`)
 
-Disabled unless `ANTHROPIC_API_KEY` is set. When enabled, the Coordinator asks
-the model to pick between **pre-validated, feasible** remediation strategies
-(`reroute` / `reassign`) and to explain the choice in one sentence. The response
-is strictly validated against the allowed set; any deviation, timeout, or error
-falls back to the deterministic choice. The model is never given free-text user
-input, never returns numbers, and never touches the database.
+Off unless `LLM_GATEWAY_URL` + `LLM_GATEWAY_API_KEY` (organizer's Bedrock/Ollama
+gateway) **or** `ANTHROPIC_API_KEY` is set. When on, the LLM does **reasoning,
+explanation and orchestration only** — the deterministic engine still owns every
+number:
+
+| Agent | LLM does | Guardrail |
+|---|---|---|
+| **Coordinator** | choose `reroute` vs `reassign` given the situation + the (deterministically-scored) alternative driver | output must be in the pre-validated allowed set, else deterministic policy |
+| **Dispatch Agent** | write the human "why this driver" sentence from the score breakdown (`assignment_explained` event, non-blocking) | display-only; cannot change the pick or the numbers |
+| **Monitoring Agent** | narrate the risk + rate urgency (`risk_assessed` event, non-blocking) | severity also computed by rule; numbers from `detect_delay` |
+| **Order Agent** | interpret the free-text delivery note → `{contactRequired, leaveUnattended, fragile}` (`note_interpreted` event) | advisory flags only; keyword parser is the fallback |
+
+Every call is time-boxed (5–8 s), validated, has a deterministic fallback, runs
+fire-and-forget off the request path where possible, and **never** touches auth,
+scoring, routing, or DB writes. Events carry a `source: "llm" | "deterministic"`
+tag so you can see which parts the model shaped. `GET /api/health` reports the
+active provider + model.
 
 ---
 

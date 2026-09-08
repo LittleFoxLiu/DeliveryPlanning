@@ -28,10 +28,11 @@ async function runPipeline(order: OrderRow, cycleId: string, opts: { excludeDriv
 }
 
 /** Score the best alternative driver WITHOUT assigning — lets the Coordinator
- *  decide whether a reassignment would actually beat a (late) reroute. */
+ *  decide whether a reassignment would actually beat a (late) reroute. Silent:
+ *  emits no agent events (it's an internal what-if). */
 async function bestAlternative(order: OrderRow, excludeDriverIds: string[], cycleId: string) {
-  const { candidates } = await driverAgent.findCandidates(order, cycleId, excludeDriverIds);
-  const routed = await routingAgent.computeCandidateRoutes(order, candidates, cycleId);
+  const { candidates } = await driverAgent.findCandidates(order, cycleId, excludeDriverIds, true);
+  const routed = await routingAgent.computeCandidateRoutes(order, candidates, cycleId, true);
   const breakdowns = routed.map(({ candidate, estimate }) => dispatchTools.score_driver(
     { orderId: order.id, packageSize: order.package_size, volume: order.volume, priority: order.priority, deadlineTs: order.deadline_ts },
     {
@@ -145,19 +146,23 @@ export const coordinator = {
     if (deterministicChoice === 'reassign' && !reassignFeasible) deterministicChoice = 'reroute';
     if (deterministicChoice === 'reroute' && !rerouteFeasible && reassignFeasible) deterministicChoice = 'reassign';
 
+    const alt = reassignFeasible ? await bestAlternative(order, [delivery.driver_id], cycleId) : null;
+    const altDriver = alt ? { name: (await drivers.byId(alt.driverId))?.name ?? alt.driverId, deadlineSlackMin: alt.factors.deadlineSlackMin } : null;
+
     const advisory = await adviseRemediation({
-      orderId: order.id,
+      orderId: `#${order.id.replace(/^ord_/, '').slice(-6).toUpperCase()}`,
       issues: finding.issues,
       slipMin: finding.slipMin,
       missesDeadline: finding.missesDeadline,
       rerouteFeasible,
-      reassignFeasible,
+      reassignFeasible: reassignFeasible && !!alt,
       deterministicChoice: deterministicChoice as 'reroute' | 'reassign',
+      alternativeDriver: altDriver,
     });
 
     await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'remediation_decided', orderId: order.id, deliveryId: delivery.id,
-      message: `Coordinator chose to ${advisory.strategy} order ${order.id} (${advisory.source}): ${advisory.rationale}`,
+      message: `Coordinator chose to ${advisory.strategy} order #${order.id.replace(/^ord_/, '').slice(-6).toUpperCase()} (${advisory.source}): ${advisory.rationale}`,
       data: advisory,
     });
 

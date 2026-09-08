@@ -1,6 +1,7 @@
 import { deliveries, orders, drivers, routes, roads, type DeliveryRow, type OrderRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
 import { calculateRoute, estimateDeliveryTime, type Point } from '../engine/routing.js';
+import { narrateRisk } from './llm.js';
 
 const NAME = 'MonitoringAgent';
 const DELAY_THRESHOLD_MIN = 3;
@@ -126,15 +127,33 @@ export const monitoringAgent = {
       if (delay.missesDeadline && (issues.includes('route_blocked') || delay.slipMin > 20)) trigger = 'reassign';
 
       if (issues.length) {
+        const orderCode = `#${order.id.replace(/^ord_/, '').slice(-6).toUpperCase()}`;
+        const severity: 'info' | 'warn' | 'critical' = delay.missesDeadline ? 'critical' : delay.slipMin >= 10 ? 'warn' : 'info';
         await emitAgentEvent({
           cycleId, agent: NAME,
           eventType: delay.missesDeadline ? 'deadline_risk_detected' : 'delay_detected',
           orderId: order.id, deliveryId: delivery.id, driverId: delivery.driver_id,
           message: delay.delayed
-            ? `Detected ${delay.slipMin}-minute delay on order ${order.id} (${issues.join(', ')}) — projected done ${new Date(delay.projectedDoneTs).toLocaleTimeString()}`
-            : `Detected ${issues.join(', ')} on order ${order.id}`,
-          data: { issues, projectedTotalMin: newEta.totalMinutes, slipMin: delay.slipMin, deviation: deviation.distance, recommendedTrigger: trigger },
+            ? `${driver.name} is ${delay.slipMin} min behind on ${orderCode} (${issues.join(', ')}) — projected arrival ${new Date(delay.projectedDoneTs).toLocaleTimeString()}`
+            : `${issues.join(', ')} on ${orderCode} (${driver.name})`,
+          data: {
+            issues, projectedTotalMin: newEta.totalMinutes, slipMin: delay.slipMin, deviation: deviation.distance,
+            recommendedTrigger: trigger, severity,
+          },
         });
+        // LLM adds a plain-language read of the risk as a follow-up (non-blocking).
+        void narrateRisk({
+          orderCode, driver: driver.name, issues, slipMin: delay.slipMin,
+          missesDeadline: delay.missesDeadline,
+          projectedDoneLocal: new Date(delay.projectedDoneTs).toLocaleTimeString(),
+        }).then(async (n) => {
+          if (n.source === 'llm') {
+            await emitAgentEvent({
+              cycleId, agent: NAME, eventType: 'risk_assessed', orderId: order.id, deliveryId: delivery.id, driverId: delivery.driver_id,
+              message: n.message, data: { severity: n.severity, source: 'llm' },
+            });
+          }
+        }).catch(() => undefined);
         findings.push({
           deliveryId: delivery.id, orderId: order.id, driverId: delivery.driver_id, phase,
           issues, projectedTotalMin: newEta.totalMinutes, slipMin: delay.slipMin,

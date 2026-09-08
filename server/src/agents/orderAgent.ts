@@ -1,5 +1,6 @@
 import { orders, merchants, stores, customers } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
+import { interpretNote } from './llm.js';
 import { config } from '../config.js';
 import type { OrderStatus } from '../engine/stateMachine.js';
 
@@ -91,11 +92,30 @@ export const orderAgent = {
 
     await orderTools.update_order_status(orderId, 'validated', ['ready', 'validated', 'dispatching', 'failed']);
     const deadlineMin = Math.round((Date.parse(order.deadline_ts) - Date.now()) / 60_000);
+    const orderCode = `#${orderId.replace(/^ord_/, '').slice(-6).toUpperCase()}`;
     await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'order_validated', orderId,
-      message: `Validated order ${orderId} — ${order.priority} priority, ${order.package_size} package, deadline in ${deadlineMin} min`,
+      message: `Validated order ${orderCode} — ${order.priority} priority, ${order.package_size} package, deadline in ${deadlineMin} min`,
       data: { constraints },
     });
+
+    // Interpret the free-text delivery note into structured flags (advisory
+    // only; fire-and-forget so it never delays dispatch).
+    if (order.note && order.note.trim()) {
+      void interpretNote(order.note).then(({ flags, source }) => {
+        if (source === 'none') return;
+        const tags = [
+          flags.contactRequired && 'contact required',
+          flags.leaveUnattended && 'leave unattended',
+          flags.fragile && 'fragile',
+        ].filter(Boolean);
+        return emitAgentEvent({
+          cycleId, agent: NAME, eventType: 'note_interpreted', orderId,
+          message: `Read the delivery note for ${orderCode}: ${tags.length ? tags.join(', ') : 'no special handling needed'}`,
+          data: { flags, source },
+        });
+      }).catch(() => undefined);
+    }
     return { ok: true, issues: [], constraints };
   },
 };
