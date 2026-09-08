@@ -11,6 +11,10 @@ export const orderTools = {
   get_order: (orderId: string) => orders.byId(orderId),
   get_merchant: (merchantId: string) => merchants.byId(merchantId),
   get_store: (storeId: string) => stores.byId(storeId),
+  get_customer: async (orderId: string) => {
+    const o = await orders.byId(orderId);
+    return o ? customers.byId(o.customer_id) : undefined;
+  },
   get_delivery_address: async (orderId: string) => {
     const o = await orders.byId(orderId);
     return o ? { lat: o.delivery_lat, lng: o.delivery_lng } : undefined;
@@ -85,7 +89,7 @@ export const orderAgent = {
       return { ok: false, issues: result.issues, constraints };
     }
 
-    await orderTools.update_order_status(orderId, 'validated', ['ready', 'dispatching', 'failed']);
+    await orderTools.update_order_status(orderId, 'validated', ['ready', 'validated', 'dispatching', 'failed']);
     const deadlineMin = Math.round((Date.parse(order.deadline_ts) - Date.now()) / 60_000);
     await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'order_validated', orderId,

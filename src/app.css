@@ -90,8 +90,18 @@ tr:last-child td { border-bottom: none; }
 .event-feed time { color: var(--muted); font-size: 11px; }
 
 /* map */
-.map-wrap { width: 100%; }
+.map-wrap { width: 100%; position: relative; }
 .grid-map { width: 100%; height: auto; background: #fbfbfa; border: 1px solid var(--line); border-radius: 10px; }
+.map-marker { cursor: pointer; }
+.map-tip { position: absolute; z-index: 30; pointer-events: none; max-width: 220px;
+  background: #1b2436; color: #fff; border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.4;
+  box-shadow: 0 8px 24px rgba(20,30,55,.25); display: flex; flex-direction: column; gap: 1px; }
+.map-tip[hidden] { display: none; }
+.map-tip strong { font-size: 12.5px; margin-bottom: 2px; }
+.map-tip span { color: #c7cede; }
+@keyframes markerPulse { 0% { transform: scale(1); opacity: .18; } 70% { transform: scale(1.8); opacity: 0; } 100% { opacity: 0; } }
+.marker-pulse { transform-box: fill-box; transform-origin: center; animation: markerPulse 1.8s ease-out infinite; }
+.next-step { background: #e0f2f1; color: #0f7a77; border-radius: 8px; padding: 8px 11px; font-size: 13px; font-weight: 600; }
 .road-edge { stroke-width: 6; stroke-linecap: round; }
 .road-moderate { stroke: #e0902a; }
 .road-heavy { stroke: #d97706; }

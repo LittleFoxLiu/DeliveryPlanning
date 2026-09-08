@@ -110,6 +110,9 @@ export function injectTraffic(input: {
   status?: 'clear' | 'moderate' | 'heavy' | 'closed';
   delayMinutes?: number;
   blockRouteOf?: string;
+  /** minor: slow one segment (recoverable → reroute). major: close it + choke
+   *  the surrounding block (usually blows the deadline → reassignment). */
+  severity?: 'minor' | 'major';
 }): Promise<TrafficChange> {
   const status = input.status ?? 'closed';
   const delay = input.delayMinutes ?? (status === 'heavy' ? 12 : status === 'moderate' ? 5 : 0);
@@ -141,6 +144,22 @@ export function injectTraffic(input: {
       if (segmentIds.length === 0) throw badRequest('could not locate a blockable segment on the remaining route');
 
       const primary = (await roads.byId(segmentIds[0]))!;
+      const severity = input.severity ?? 'major';
+      if (severity === 'minor') {
+        // slow a few consecutive segments on the route so the delay is real but
+        // a detour still beats the deadline
+        for (let k = idx + 1; k < Math.min(idx + 4, path.length); k++) {
+          const rid = await findRoadId(path[k - 1], path[k]);
+          if (rid && !changed.includes(rid)) { await roads.setStatus(rid, 'heavy', 10); changed.push(rid); }
+        }
+        if (!changed.length) { await roads.setStatus(primary.id, 'heavy', 10); changed.push(primary.id); }
+        await emitAgentEvent({
+          agent: 'TrafficFeed', eventType: 'traffic_updated',
+          message: `Heavy traffic building on the active route near ${primary.id} (+10 min) — a recoverable delay`,
+          data: { segments: changed, status: 'heavy', incidentType: 'congestion' },
+        });
+        return { closed: [], updated: changed };
+      }
       await roads.setStatus(primary.id, 'closed', 0);
       changed.push(primary.id);
       const nodes = new Set([`${primary.ax},${primary.ay}`, `${primary.bx},${primary.by}`]);
@@ -153,8 +172,8 @@ export function injectTraffic(input: {
       }
       await emitAgentEvent({
         agent: 'TrafficFeed', eventType: 'traffic_updated',
-        message: `Incident on ${primary.id} — road closed and surrounding streets now heavily congested (+15 min)`,
-        data: { segments: changed, closed: [primary.id] },
+        message: `Traffic incident on ${primary.id} — road closed and surrounding streets heavily congested (+15 min)`,
+        data: { segments: changed, closed: [primary.id], incidentType: 'accident' },
       });
       return { closed: [primary.id], updated: changed };
     }

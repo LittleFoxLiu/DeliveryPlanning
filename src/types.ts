@@ -12,9 +12,10 @@ export interface AgentEvent {
 }
 
 export interface OrderDto {
-  id: string; status: string; priority: string; packageSize: string; volume: number;
+  id: string; code: string; status: string; priority: string; packageSize: string; volume: number;
   deadlineTs: string; note: string | null; pickup: Point; dropoff: Point;
-  merchantId?: string; storeId?: string; customerId?: string;
+  merchantId?: string; storeId?: string; storeName?: string | null;
+  customerId?: string; customerName: string;
   items: { name: string; qty: number }[]; createdAt?: string; readyAt?: string | null;
   delivery?: DeliveryDto | null;
 }

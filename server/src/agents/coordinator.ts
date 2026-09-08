@@ -27,6 +27,23 @@ async function runPipeline(order: OrderRow, cycleId: string, opts: { excludeDriv
   return dispatchAgent.evaluateAndAssign(order, routed, cycleId, { idempotencyKey: opts.idempotencyKey ?? null });
 }
 
+/** Score the best alternative driver WITHOUT assigning — lets the Coordinator
+ *  decide whether a reassignment would actually beat a (late) reroute. */
+async function bestAlternative(order: OrderRow, excludeDriverIds: string[], cycleId: string) {
+  const { candidates } = await driverAgent.findCandidates(order, cycleId, excludeDriverIds);
+  const routed = await routingAgent.computeCandidateRoutes(order, candidates, cycleId);
+  const breakdowns = routed.map(({ candidate, estimate }) => dispatchTools.score_driver(
+    { orderId: order.id, packageSize: order.package_size, volume: order.volume, priority: order.priority, deadlineTs: order.deadline_ts },
+    {
+      driverId: candidate.driver.id, name: candidate.driver.name, status: candidate.driver.status,
+      vehicleType: candidate.driver.vehicle_type, maxPackageSize: candidate.driver.max_package_size,
+      capacity: candidate.driver.capacity, currentOrderCount: candidate.driver.current_order_count,
+    },
+    estimate,
+  ));
+  return dispatchTools.compare_assignments(breakdowns).winner;
+}
+
 export const coordinator = {
   name: NAME,
 
@@ -159,12 +176,33 @@ export const coordinator = {
     });
 
     const result = await routingAgent.recalculate(delivery, order, pos, finding.phase, cycleId);
+    const canReassign = !['picked_up', 'en_route_drop'].includes(delivery.status);
     if (!result.ok) {
-      if (!['picked_up', 'en_route_drop'].includes(delivery.status)) {
-        return coordinator.reassign(finding, cycleId, [delivery.driver_id!]);
-      }
+      if (canReassign) return coordinator.reassign(finding, cycleId, [delivery.driver_id!]);
       await deliveries.update(delivery.id, { eta_ts: null });
       return { orderId: order.id, strategy: 'reroute', ok: false, detail: 'no_viable_route_and_package_in_transit' };
+    }
+
+    // The reroute worked, but does it still beat the deadline? If not and the
+    // package hasn't been collected yet, see whether another driver can — this
+    // is the "Driver B finishes faster" reassignment path.
+    const deadlineMs = Date.parse(order.deadline_ts);
+    const stillLate = Date.now() + result.etaMinutes * 60_000 > deadlineMs;
+    if (stillLate && canReassign) {
+      const alt = await bestAlternative(order, [delivery.driver_id!], cycleId);
+      if (alt && alt.factors.deadlineSlackMin >= 0) {
+        await emitAgentEvent({
+          cycleId, agent: NAME, eventType: 'reroute_insufficient', orderId: order.id, deliveryId: delivery.id,
+          message: `Rerouted ETA for ${delivery.driver_id} (${result.etaMinutes} min) still misses the deadline; `
+            + `${alt.driverId} can make it with ${alt.factors.deadlineSlackMin} min to spare — reassigning`,
+          data: { reroutedEtaMin: result.etaMinutes, alternative: alt.driverId, altSlackMin: alt.factors.deadlineSlackMin },
+        });
+        return coordinator.reassign(finding, cycleId, [delivery.driver_id!]);
+      }
+      await emitAgentEvent({
+        cycleId, agent: NAME, eventType: 'reroute_kept', orderId: order.id, deliveryId: delivery.id,
+        message: `No available driver can beat the deadline either — keeping ${delivery.driver_id} on the fastest route (ETA ${result.etaMinutes} min)`,
+      });
     }
 
     const newEtaTs = minutesFromNow(result.etaMinutes);

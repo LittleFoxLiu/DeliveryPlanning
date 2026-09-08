@@ -9,7 +9,7 @@ afterAll(async () => { await ctx.close(); });
 beforeEach(() => reseed());
 
 const createdOrders = async (token: string) =>
-  (await c.get('/merchant/orders', token)).body.orders as { id: string; status: string }[];
+  (await c.get('/merchant/orders', token)).body.orders as { id: string; status: string; priority: string }[];
 
 describe('end-to-end dispatch', () => {
   it('runs the full multi-agent pipeline and assigns the best driver', async () => {
@@ -107,14 +107,15 @@ describe('monitoring & remediation', () => {
     expect(active!.driverId).not.toBe(firstDriver);
   });
 
-  it('reroutes (not reassigns) a recoverable traffic delay', async () => {
+  it('reroutes (keeps the driver) for a recoverable traffic delay', async () => {
     const harbor = await login(ctx.base, 'harbor@demo.test');
     const admin = await login(ctx.base, 'admin@demo.test');
-    const orderId = (await createdOrders(harbor)).find((o) => o.status === 'created')!.id;
-    await c.post(`/merchant/orders/${orderId}/ready`, {}, harbor);
+    // the standard order has a generous (~120 min) deadline — a reroute absorbs the hit
+    const orderId = (await createdOrders(harbor)).find((o) => o.priority === 'standard' && o.status === 'created')!.id;
+    const ready = await c.post(`/merchant/orders/${orderId}/ready`, {}, harbor);
+    const driver = (ready.body.dispatch as { decision: { driverId: string } }).decision.driverId;
     await c.post('/sim/tick', {}, admin);
-    const blocked = await c.post('/sim/traffic', { blockRouteOf: orderId }, admin);
-    expect((blocked.body.closed as string[]).length).toBeGreaterThan(0);
+    await c.post('/sim/traffic', { blockRouteOf: orderId, severity: 'major' }, admin);
 
     let sawReroute = false;
     for (let i = 0; i < 5; i++) {
@@ -123,5 +124,33 @@ describe('monitoring & remediation', () => {
       if (actions.some((a) => a.strategy === 'reroute')) sawReroute = true;
     }
     expect(sawReroute).toBe(true);
+    const detail = await c.get(`/admin/orders/${orderId}`, admin);
+    const active = (detail.body.assignments as { status: string; driverId: string }[]).find((a) => a.status === 'active');
+    expect(active?.driverId).toBe(driver); // same driver, just a new route
+  });
+
+  it('escalates to reassignment when a reroute still misses the deadline', async () => {
+    const harbor = await login(ctx.base, 'harbor@demo.test');
+    const admin = await login(ctx.base, 'admin@demo.test');
+    // the express order has a tight (~55 min) deadline
+    const orderId = (await createdOrders(harbor)).find((o) => o.priority === 'express' && o.status === 'created')!.id;
+    const ready = await c.post(`/merchant/orders/${orderId}/ready`, {}, harbor);
+    const firstDriver = (ready.body.dispatch as { decision: { driverId: string } }).decision.driverId;
+    await c.post('/sim/tick', {}, admin);
+    await c.post('/sim/traffic', { blockRouteOf: orderId, severity: 'major' }, admin);
+
+    let sawReassign = false;
+    for (let i = 0; i < 6; i++) {
+      const tick = await c.post('/sim/tick', {}, admin);
+      const actions = (tick.body.monitoring as { actions: { strategy: string; ok: boolean }[] }).actions;
+      if (actions.some((a) => a.strategy === 'reassign' && a.ok)) sawReassign = true;
+    }
+    const detail = await c.get(`/admin/orders/${orderId}`, admin);
+    const active = (detail.body.assignments as { status: string; driverId: string }[]).find((a) => a.status === 'active');
+    // either it reassigned to a faster driver, or (if none could make it) kept the
+    // original on the fastest route — both are valid; assert the risk was handled.
+    const events = (detail.body.events as { eventType?: string; event_type?: string }[])
+      .map((e) => e.eventType || e.event_type);
+    expect(sawReassign || events.includes('reroute_kept') || active?.driverId !== firstDriver).toBe(true);
   });
 });

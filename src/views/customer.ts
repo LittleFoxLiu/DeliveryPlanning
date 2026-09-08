@@ -1,7 +1,7 @@
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
-import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue } from '../ui';
-import { renderMap, type MapMarker } from '../map';
+import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, parseItemsInput } from '../ui';
+import { renderMap, enableMapTooltips, type MapMarker } from '../map';
 import type { RoadSeg, Point } from '../types';
 
 interface Tracking {
@@ -45,7 +45,7 @@ function view(orders: { id: string; status: string }[], t: Tracking | null): str
       <div>
         <div class="card">
           <div class="card-head"><h2>Orders</h2></div>
-          ${orders.length ? `<div class="pill-row">${orders.map((o) => `<button class="chip-btn" style="width:auto" data-pick="${esc(o.id)}">${esc(o.id.slice(-6))} · ${o.status}</button>`).join('')}</div>` : '<p class="muted">No orders yet — place one below.</p>'}
+          ${orders.length ? `<div class="pill-row">${orders.map((o) => `<button class="chip-btn" style="width:auto" data-pick="${esc(o.id)}">#${esc(o.id.replace(/^ord_/, '').slice(-6).toUpperCase())} ${customerChip(o.status)}</button>`).join('')}</div>` : '<p class="muted">No orders yet — place one below.</p>'}
         </div>
         ${t ? trackingCard(t) : ''}
       </div>
@@ -60,7 +60,7 @@ function trackingCard(t: Tracking): string {
   const mins = minutesUntil(t.delivery?.etaTs);
   const done = t.order.status === 'delivered';
   return `<div class="card">
-    <div class="card-head"><h2>Order ${esc(t.order.id.slice(-6))}</h2>${statusChip(t.order.status)}</div>
+    <div class="card-head"><h2>Order #${esc(t.order.id.replace(/^ord_/, '').slice(-6).toUpperCase())}</h2>${customerChip(t.order.status, t.delivery?.status)}</div>
     <div class="big-eta">${done ? 'Delivered' : t.delivery?.etaTs ? `${fmtTime(t.delivery.etaTs)}` : 'Pending'}</div>
     <p class="muted">${done ? `Arrived ${fmtTime(t.delivery?.deliveredAt)}` : mins !== null ? `about ${mins} minutes away` : 'Waiting for a driver'}</p>
     <dl class="kv" style="margin-top:12px">
@@ -74,8 +74,19 @@ function trackingCard(t: Tracking): string {
 }
 
 function mapFor(t: Tracking): string {
-  const markers: MapMarker[] = [{ x: t.order.dropoff.x, y: t.order.dropoff.y, kind: 'dropoff', label: 'You' }];
-  if (t.delivery?.driverPosition) markers.push({ x: t.delivery.driverPosition.x, y: t.delivery.driverPosition.y, kind: 'driver', label: 'Driver' });
+  const code = `#${t.order.id.replace(/^ord_/, '').slice(-6).toUpperCase()}`;
+  const itemStr = t.order.items.map((i) => `${i.name}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ') || '—';
+  const markers: MapMarker[] = [{
+    x: t.order.dropoff.x, y: t.order.dropoff.y, kind: 'dropoff', title: `Your delivery ${code}`,
+    tip: [itemStr, `Status: ${(t.delivery?.status ?? t.order.status).replace(/_/g, ' ')}`, `Deadline ${fmtTime(t.order.deadlineTs)}`],
+  }];
+  if (t.delivery?.driverPosition) {
+    markers.push({
+      x: t.delivery.driverPosition.x, y: t.delivery.driverPosition.y, kind: 'driver', pulse: true,
+      title: t.delivery.driver ? `${t.delivery.driver.firstName} (your driver)` : 'Your driver',
+      tip: [t.delivery.driver ? t.delivery.driver.vehicleType : 'en route', t.delivery.etaTs ? `ETA ${fmtTime(t.delivery.etaTs)}` : ''],
+    });
+  }
   return renderMap({ size: grid.size, roads: grid.roads, markers, paths: [] });
 }
 
@@ -86,6 +97,7 @@ function orderForm(): string {
     <div class="card-head"><h2>Place an order</h2></div>
     <form class="inline-form" id="cust-order">
       <label class="full">Merchant / store<select name="storeId">${storeOpts}</select></label>
+      <label class="full">What do you want? <span class="muted">(comma-separated)</span><input name="items" value="Sourdough loaf, Almond croissant ×2" required></label>
       <label>Deliver to X<input name="deliveryLat" type="number" min="0" max="20" value="17" required></label>
       <label>Deliver to Y<input name="deliveryLng" type="number" min="0" max="20" value="3" required></label>
       <label>Priority<select name="priority"><option>standard</option><option>express</option></select></label>
@@ -98,17 +110,20 @@ function orderForm(): string {
 }
 
 function wire(el: HTMLElement, _orders: unknown): void {
+  enableMapTooltips(el);
   el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; renderCustomer(el); }));
   const form = el.querySelector<HTMLFormElement>('#cust-order');
   form?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
     try {
+      const items = parseItemsInput(String(fd.get('items') || ''));
       const res = await post<{ order: { id: string } }>('/customer/orders', {
         storeId: fd.get('storeId'),
         deliveryLat: Number(fd.get('deliveryLat')), deliveryLng: Number(fd.get('deliveryLng')),
         priority: fd.get('priority'), packageSize: fd.get('packageSize'),
-        deadlineTs: new Date(String(fd.get('deadlineTs'))).toISOString(), volume: 1,
+        deadlineTs: new Date(String(fd.get('deadlineTs'))).toISOString(),
+        items, volume: Math.max(1, items.reduce((n, i) => n + i.qty, 0)),
       });
       selected = res.order.id;
       toast('Order placed');

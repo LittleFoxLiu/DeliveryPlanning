@@ -1,4 +1,4 @@
-import { roads, type OrderRow, type DeliveryRow } from '../repo.js';
+import { roads, traffic, type OrderRow, type DeliveryRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
 import {
   calculateRoute, calculateEta, calculateDistance, estimateDeliveryTime, compareRoutes,
@@ -18,6 +18,17 @@ export const routingTools = {
       closed: segs.filter((s) => s.status === 'closed').map((s) => s.id),
       heavy: segs.filter((s) => s.status === 'heavy').map((s) => s.id),
       moderate: segs.filter((s) => s.status === 'moderate').map((s) => s.id),
+    };
+  },
+  /** Full traffic picture: per-segment incidents + area-level conditions. */
+  get_traffic_conditions: async () => {
+    const [segs, areas] = await Promise.all([roads.all(), traffic.all()]);
+    const incidents = segs.filter((s) => s.status !== 'clear')
+      .map((s) => ({ segmentId: s.id, status: s.status, delayMinutes: s.delay_minutes }));
+    return {
+      incidents,
+      areas: areas.map((a) => ({ area: a.area, status: a.status, delayMinutes: a.delay_minutes, source: a.source })),
+      summary: { closed: incidents.filter((i) => i.status === 'closed').length, heavy: incidents.filter((i) => i.status === 'heavy').length, moderate: incidents.filter((i) => i.status === 'moderate').length },
     };
   },
   estimate_delivery_time: async (driverLoc: Point, pickup: Point, dropoff: Point) =>

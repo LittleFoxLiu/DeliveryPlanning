@@ -2,7 +2,15 @@ import type { Point, RoadSeg } from './types';
 
 const BASE = 1000;
 
-export interface MapMarker { x: number; y: number; kind: 'pickup' | 'dropoff' | 'driver' | 'depot'; label?: string }
+export interface MapMarker {
+  x: number; y: number;
+  kind: 'pickup' | 'dropoff' | 'driver' | 'depot';
+  label?: string;
+  /** Heading + detail lines shown in the hover card. */
+  title?: string;
+  tip?: string[];
+  pulse?: boolean;
+}
 export interface MapPath { points: Point[]; color: string; active?: boolean; dashed?: boolean }
 
 export interface MapInput {
@@ -15,6 +23,10 @@ export interface MapInput {
 const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c] as string
 ));
+
+const KIND_COLOR: Record<MapMarker['kind'], string> = {
+  pickup: '#f1c75b', dropoff: '#5277d7', driver: '#159c99', depot: '#98a2b3',
+};
 
 export function renderMap({ size, roads, markers, paths }: MapInput): string {
   const cell = BASE / (size || 20);
@@ -41,25 +53,60 @@ export function renderMap({ size, roads, markers, paths }: MapInput): string {
 
   const markerSvg = markers.map((m) => {
     const cx = p(m.x); const cy = p(m.y);
-    const colors: Record<MapMarker['kind'], string> = {
-      pickup: '#f1c75b', dropoff: '#5277d7', driver: '#159c99', depot: '#98a2b3',
-    };
+    const color = KIND_COLOR[m.kind];
     const r = m.kind === 'driver' ? 11 : 8;
-    return `<g><circle cx="${cx}" cy="${cy}" r="${r + 4}" fill="${colors[m.kind]}" opacity="0.18"/>` +
-      `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${colors[m.kind]}" stroke="#fff" stroke-width="2">` +
-      `<title>${esc(m.label || m.kind)} · (${m.x}, ${m.y})</title></circle></g>`;
+    const heading = m.title || m.label || m.kind;
+    const lines = (m.tip && m.tip.length ? m.tip : [`(${m.x}, ${m.y})`]);
+    const tipAttr = esc([heading, ...lines].join('\n'));
+    return `<g class="map-marker" data-tip="${tipAttr}">`
+      + `<circle cx="${cx}" cy="${cy}" r="${r + 9}" fill="${color}" opacity="0.001"/>` // hover target
+      + `<circle cx="${cx}" cy="${cy}" r="${r + 4}" fill="${color}" opacity="0.18"${m.pulse ? ' class="marker-pulse"' : ''}/>`
+      + `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${color}" stroke="#fff" stroke-width="2">`
+      + `<title>${esc(heading)} — ${esc(lines.join(' · '))}</title></circle></g>`;
   }).join('');
 
-  return `<div class="map-wrap"><svg viewBox="-20 -20 ${BASE + 40} ${BASE + 40}" class="grid-map" role="img" aria-label="Delivery grid">
-    <g class="grid-lines" stroke="#e7e9ed" stroke-width="1">${grid}</g>
-    ${roadSvg}${pathSvg}${markerSvg}
-  </svg>
-  <div class="map-key">
-    <span><i style="background:#f1c75b"></i>Pickup</span>
-    <span><i style="background:#5277d7"></i>Drop-off</span>
-    <span><i style="background:#159c99"></i>Driver</span>
-    <span><i style="background:#db4e36"></i>Closed road</span>
-  </div></div>`;
+  return `<div class="map-wrap">
+    <svg viewBox="-20 -20 ${BASE + 40} ${BASE + 40}" class="grid-map" role="img" aria-label="Delivery grid">
+      <g class="grid-lines" stroke="#e7e9ed" stroke-width="1">${grid}</g>
+      ${roadSvg}${pathSvg}${markerSvg}
+    </svg>
+    <div class="map-tip" hidden></div>
+    <div class="map-key">
+      <span><i style="background:#f1c75b"></i>Pickup</span>
+      <span><i style="background:#5277d7"></i>Drop-off</span>
+      <span><i style="background:#159c99"></i>Driver</span>
+      <span><i style="background:#db4e36"></i>Closed road</span>
+      <span class="muted">hover for details</span>
+    </div>
+  </div>`;
+}
+
+/** Wire the floating hover card. Call after each render on the map's container. */
+export function enableMapTooltips(root: HTMLElement | Document = document): void {
+  root.querySelectorAll<HTMLElement>('.map-wrap').forEach((wrap) => {
+    if (wrap.dataset.tipsWired) return;
+    wrap.dataset.tipsWired = '1';
+    const tip = wrap.querySelector<HTMLElement>('.map-tip');
+    if (!tip) return;
+    const show = (el: Element, ev: MouseEvent) => {
+      const raw = (el as HTMLElement).dataset.tip || '';
+      const [head, ...rest] = raw.split('\n');
+      tip.innerHTML = `<strong>${head}</strong>${rest.map((l) => `<span>${l}</span>`).join('')}`;
+      tip.hidden = false;
+      const b = wrap.getBoundingClientRect();
+      let left = ev.clientX - b.left + 14;
+      let top = ev.clientY - b.top + 14;
+      if (left + 220 > b.width) left = ev.clientX - b.left - 224;
+      if (top + tip.offsetHeight > b.height) top = ev.clientY - b.top - tip.offsetHeight - 10;
+      tip.style.left = `${Math.max(4, left)}px`;
+      tip.style.top = `${Math.max(4, top)}px`;
+    };
+    wrap.addEventListener('mousemove', (ev) => {
+      const el = (ev.target as Element).closest('.map-marker');
+      if (el) show(el, ev); else tip.hidden = true;
+    });
+    wrap.addEventListener('mouseleave', () => { tip.hidden = true; });
+  });
 }
 
 export function routeToPath(route: { path?: { toPickup?: Point[]; toDropoff?: Point[] } } | null | undefined): Point[] {

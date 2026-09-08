@@ -74,15 +74,21 @@ Other scripts: `npm test` (Vitest), `npm run typecheck`, `npm run build`,
    route efficiency, and the rejected candidates).
 4. On the Dispatch screen click **▶ Simulate tick** a couple of times – drivers
    move along their routes.
-5. Click **⚠ Block a route** – a road on the active route is closed and the
-   surrounding streets go heavy.
-6. Click **▶ Simulate tick** again – the **Monitoring Agent** detects the delay,
-   the **Coordinator** decides to reroute, the **Routing Agent** finds an
-   alternative, and the customer-facing ETA updates.
+5. Click **⚠ Simulate traffic incident** – a road on the active route is closed
+   and the surrounding streets go heavy.
+6. Click **▶ Simulate tick** again:
+   - **Monitoring Agent** detects the delay / deadline risk.
+   - **Coordinator** asks the **Routing Agent** to recalculate.
+   - If the new route still meets the deadline → **reroute**, same driver, ETA
+     updated. If it *doesn't*, the Coordinator checks the other drivers and, if
+     one can make it, **reassigns** ("Driver B can make it with N min to spare").
+     Use the **express** order for the reassignment path (tight deadline).
 7. Alternatively click **Take offline** on the assigned driver, then **tick** –
    the Monitoring Agent detects the driver is gone and the Coordinator runs a
    full **reassignment** to the next-best driver.
-8. **Customer** screen – the ETA and the live progress feed update throughout.
+8. **Customer** screen – the friendly status (`Placed → Preparing → Driver
+   assigned → Picked up → In transit → Delivered`), ETA and live progress feed
+   update throughout. Agent messages use driver **names**, not ids.
 
 `Reset demo` restores the seed data at any time.
 
@@ -117,10 +123,10 @@ Agent     Agent   Agent   Agent     Agent
 
 | Agent | Decides | Tools (deterministic) |
 |-------|---------|-----------------------|
-| **Order Agent** | is the order/merchant/pickup/delivery valid; what are the constraints & deadline; order state | `get_order` `validate_order` `get_merchant` `get_store` `get_delivery_address` `get_order_constraints` `update_order_status` |
+| **Order Agent** | is the order/merchant/pickup/customer valid; constraints & deadline; order state | `get_order` `get_merchant` `get_store` `get_customer` `get_delivery_address` `get_order_constraints` `validate_order` `update_order_status` |
 | **Driver Agent** | which drivers are *eligible* (status, live location, capacity, vehicle compatibility, existing load) — **not** "closest" | `get_available_drivers` `get_all_drivers` `get_driver_location` `get_driver_status` `get_driver_capacity` `get_driver_vehicle` `get_driver_current_route` `update_driver_status` |
-| **Routing Agent** | authoritative driver→pickup→customer route, ETA, distance, traffic penalty; recalculation when conditions change | `calculate_route` `calculate_eta` `calculate_distance` `check_traffic` `estimate_delivery_time` `compare_routes` |
-| **Dispatch Agent** | score every candidate, compare, pick the best, assign atomically, notify, cancel/reassign | `get_candidate_drivers` `score_driver` `compare_assignments` `assign_order` `notify_driver` `cancel_assignment` |
+| **Routing Agent** | authoritative driver→pickup→customer route, ETA, distance, traffic penalty; recalculation when conditions change | `calculate_route` `calculate_eta` `calculate_distance` `check_traffic` `get_traffic_conditions` `estimate_delivery_time` `compare_routes` |
+| **Dispatch Agent** | score every candidate, compare, pick the best, assign atomically, notify, cancel/reassign | `get_candidate_drivers` `score_driver` `compare_assignments` `assign_order` `notify_driver` `cancel_assignment` `reassign_order` |
 | **Monitoring Agent** | for each active delivery: delayed? deviating? driver gone? deadline at risk? recommend reroute vs reassign | `get_driver_position` `get_order_status` `get_current_route` `detect_delay` `detect_route_deviation` `estimate_new_eta` `trigger_reassignment` |
 | **Coordinator** | the workflow: run the pipeline, react to monitoring findings, choose remediation, drive reroute/reassignment | (delegates to the agents above; optionally consults the LLM advisor) |
 
@@ -130,11 +136,13 @@ Agent     Agent   Agent   Agent     Agent
   Segment cost = `base × trafficMultiplier + delay`; closed roads are impassable.
   Produces path, distance (km), ETA (min), and a traffic-penalty (ETA − ideal
   free-flow time).
-- **`engine/scoring.ts`** — explainable multi-factor score (0–100). Hard
-  disqualifiers: vehicle incompatible, driver on break/offline, at capacity, no
-  viable route, **deadline cannot be met**. Weighted factors: total delivery
-  time, deadline slack, route efficiency, availability, capacity headroom.
-  Ties broken deterministically by driver id.
+- **`engine/scoring.ts`** — explainable multi-factor score (0–100), sums to the
+  product-spec weighting: **ETA 40**, route efficiency 20, deadline feasibility
+  15, driver workload 10, spare vehicle capacity 8, raw distance to pickup 7.
+  Hard disqualifiers (checked before scoring): vehicle incompatible, driver on
+  break/offline, at capacity, no viable route, **deadline cannot be met**. Every
+  driver's contributions are shown in the dispatch UI. Ties broken
+  deterministically by driver id.
 - **`engine/stateMachine.ts`** — legal order/delivery transitions; terminal
   states can't be resurrected.
 

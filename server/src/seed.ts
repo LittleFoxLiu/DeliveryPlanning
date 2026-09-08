@@ -13,7 +13,19 @@ export async function seed(opts: { reset?: boolean } = {}): Promise<void> {
   if (opts.reset) await resetDb();
 
   const existing = await q1<{ n: number }>('SELECT COUNT(*)::int AS n FROM users');
-  if ((existing?.n ?? 0) > 0 && !opts.reset) return;
+  if ((existing?.n ?? 0) > 0 && !opts.reset) {
+    // Data already seeded. Keep the demo usable across days by refreshing the
+    // deadline of any not-yet-dispatched order whose deadline has passed
+    // (persistent local DB only — this never rewrites in-flight deliveries).
+    const bumped = await q<{ id: string }>(
+      `UPDATE orders SET deadline_ts = now() + interval '90 minutes'
+       WHERE status IN ('created','ready','validated') AND deadline_ts < now()
+       RETURNING id`);
+    if (bumped.length && process.env.NODE_ENV !== 'test') {
+      console.log(`[seed] refreshed ${bumped.length} stale order deadline(s)`);
+    }
+    return;
+  }
 
   // --- road grid ---
   for (const s of buildRoadGrid()) {

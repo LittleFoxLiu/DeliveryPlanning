@@ -45,17 +45,32 @@ async function makePglite(): Promise<Backend> {
   if (loc && config.dbFile !== ':memory:') mkdirSync(dirname(config.dbFile), { recursive: true });
   const pg = new PGlite(loc);
   await pg.waitReady;
-  const wrap = (q: { query: (s: string, p?: unknown[]) => Promise<{ rows: unknown[] }> }): Querier => ({
+
+  // PGlite is a single embedded engine — concurrent .query() calls race and can
+  // corrupt its page cache. Serialise every DB operation through one promise
+  // chain. (Real Postgres uses a connection pool and needs none of this.)
+  let gate: Promise<unknown> = Promise.resolve();
+  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = gate.then(fn, fn);
+    gate = run.then(() => undefined, () => undefined);
+    return run;
+  };
+
+  const wrap = (q: { query: (s: string, p?: unknown[]) => Promise<{ rows: unknown[] }> }, direct = false): Querier => ({
     query: async (sql, params) => {
-      const res = await q.query(toPg(sql), params as unknown[] | undefined);
-      return { rows: normalizeRows(res.rows as never[]) };
+      const exec = async () => {
+        const res = await q.query(toPg(sql), params as unknown[] | undefined);
+        return { rows: normalizeRows(res.rows as never[]) };
+      };
+      // inside a transaction the queries are already ordered by the caller
+      return direct ? exec() : serialize(exec);
     },
   });
   return {
     kind: 'pglite',
     raw: wrap(pg),
-    exec: (sql) => pg.exec(sql).then(() => undefined),
-    transaction: (fn) => pg.transaction((tx) => fn(wrap(tx as never))) as Promise<never>,
+    exec: (sql) => serialize(() => pg.exec(sql)).then(() => undefined),
+    transaction: (fn) => serialize(() => pg.transaction((tx) => fn(wrap(tx as never, true)))) as Promise<never>,
     close: () => pg.close(),
   };
 }

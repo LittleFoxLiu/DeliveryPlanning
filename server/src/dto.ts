@@ -1,15 +1,21 @@
 import {
-  orders, deliveries, drivers, routes, assignments,
+  orders, deliveries, drivers, routes, assignments, customers, stores,
   type OrderRow, type DeliveryRow, type DriverFull,
 } from './repo.js';
 import { listEvents } from './events.js';
 
 export async function orderView(o: OrderRow) {
+  const [items, customer, store] = await Promise.all([
+    orders.items(o.id), customers.byId(o.customer_id), stores.byId(o.store_id),
+  ]);
   return {
     id: o.id,
+    code: `#${o.id.replace(/^ord_/, '').slice(-6).toUpperCase()}`,
     merchantId: o.merchant_id,
     storeId: o.store_id,
+    storeName: store?.name ?? null,
     customerId: o.customer_id,
+    customerName: customer?.name ?? 'Customer',
     status: o.status,
     priority: o.priority,
     packageSize: o.package_size,
@@ -20,7 +26,7 @@ export async function orderView(o: OrderRow) {
     dropoff: { x: o.delivery_lat, y: o.delivery_lng },
     createdAt: o.created_at,
     readyAt: o.ready_at,
-    items: await orders.items(o.id),
+    items,
   };
 }
 
@@ -81,14 +87,26 @@ export function driverPublicView(d: DriverFull | undefined) {
 
 export async function assignmentReasoningView(orderId: string) {
   const list = await assignments.forOrder(orderId);
-  return list.map((a) => ({
-    id: a.id,
-    driverId: a.driver_id,
-    status: a.status,
-    score: a.score,
-    createdAt: a.created_at,
-    reasoning: a.reasoning_json,
-  }));
+  const names = new Map((await drivers.all()).map((d) => [d.id, d.name]));
+  const nameOf = (id: string) => names.get(id) ?? id;
+  const humanize = (v: unknown): unknown => {
+    if (typeof v === 'string') return v.replace(/\bdrv_[a-z0-9]{6,40}\b/gi, (m) => nameOf(m));
+    if (Array.isArray(v)) return v.map(humanize);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, val]) => [k, humanize(val)]));
+    return v;
+  };
+  return list.map((a) => {
+    const reasoning = humanize(a.reasoning_json) as Record<string, unknown> & { selected?: string };
+    return {
+      id: a.id,
+      driverId: a.driver_id,
+      driverName: nameOf(a.driver_id),
+      status: a.status,
+      score: a.score,
+      createdAt: a.created_at,
+      reasoning: { ...reasoning, selectedName: a.driver_id ? nameOf(a.driver_id) : null },
+    };
+  });
 }
 
 export async function orderTrackingView(o: OrderRow) {

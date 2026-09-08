@@ -2,7 +2,7 @@ import type { OrderDto, DriverDto, AgentEvent, RoadSeg } from '../types';
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil } from '../ui';
-import { renderMap, routeToPath, type MapMarker, type MapPath } from '../map';
+import { renderMap, routeToPath, enableMapTooltips, type MapMarker, type MapPath } from '../map';
 
 interface Overview {
   orders: OrderDto[];
@@ -21,6 +21,7 @@ interface Reasoning {
 }
 
 const ROUTE_COLORS = ['#f26249', '#159c99', '#5277d7', '#9b6dd1', '#e0902a', '#3f9d6b'];
+const itemText = (o: OrderDto) => o.items.map((it) => `${it.name}${it.qty > 1 ? ` ×${it.qty}` : ''}`).join(', ') || '—';
 let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
 let expanded = new Set<string>();
 
@@ -46,11 +47,38 @@ function view(ov: Overview): string {
 
   const markers: MapMarker[] = [];
   const paths: MapPath[] = [];
-  ov.drivers.forEach((d) => { if (d.location) markers.push({ x: d.location.x, y: d.location.y, kind: 'driver', label: d.name }); });
+  const ordersByDriver = new Map<string, OrderDto[]>();
+  ov.orders.forEach((o) => {
+    if (o.delivery?.driverId) {
+      const arr = ordersByDriver.get(o.delivery.driverId) ?? [];
+      arr.push(o); ordersByDriver.set(o.delivery.driverId, arr);
+    }
+  });
+  ov.drivers.forEach((d) => {
+    if (!d.location) return;
+    const carrying = ordersByDriver.get(d.id) ?? [];
+    markers.push({
+      x: d.location.x, y: d.location.y, kind: 'driver', title: `${d.name} (driver)`,
+      pulse: d.status === 'on_route',
+      tip: [
+        `${d.vehicleType} · fits ${d.maxPackageSize}`,
+        `Status: ${d.status.replace(/_/g, ' ')}`,
+        `Load: ${d.currentOrderCount}/${d.capacity}`,
+        `At (${d.location.x}, ${d.location.y})`,
+        ...(carrying.length ? [`Order: ${carrying.map((o) => `${o.code} for ${o.customerName}`).join(', ')}`] : []),
+      ],
+    });
+  });
   ov.orders.forEach((o, i) => {
-    markers.push({ x: o.pickup.x, y: o.pickup.y, kind: 'pickup', label: `Pickup ${o.id.slice(-4)}` });
-    markers.push({ x: o.dropoff.x, y: o.dropoff.y, kind: 'dropoff', label: `Drop ${o.id.slice(-4)}` });
     const dlv = ov.deliveries.find((d) => d && d.orderId === o.id) as { route?: Parameters<typeof routeToPath>[0] } | undefined;
+    markers.push({
+      x: o.pickup.x, y: o.pickup.y, kind: 'pickup', title: `Pickup — ${o.storeName ?? 'Merchant'}`,
+      tip: [`${o.code} · ${o.priority}`, `Items: ${itemText(o)}`, `at (${o.pickup.x}, ${o.pickup.y})`],
+    });
+    markers.push({
+      x: o.dropoff.x, y: o.dropoff.y, kind: 'dropoff', title: `${o.customerName} (customer)`,
+      tip: [`${o.code} · ${o.status.replace(/_/g, ' ')}`, `Items: ${itemText(o)}`, `Deadline ${fmtTime(o.deadlineTs)}`, `at (${o.dropoff.x}, ${o.dropoff.y})`],
+    });
     const pts = routeToPath(dlv?.route);
     if (pts.length > 1) paths.push({ points: pts, color: ROUTE_COLORS[i % ROUTE_COLORS.length], active: true });
   });
@@ -86,8 +114,8 @@ function view(ov: Overview): string {
     <div class="card">
       <div class="card-head"><h2>Active orders &amp; assignment reasoning</h2></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Order</th><th>Status</th><th>Priority</th><th>Deadline</th><th>Assigned driver</th><th>ETA</th><th></th></tr></thead>
-        <tbody>${ov.orders.map((o) => orderRow(o, ov)).join('') || `<tr><td colspan="7" class="muted">No active orders. Have a merchant mark an order ready.</td></tr>`}</tbody>
+        <thead><tr><th>Order</th><th>Customer</th><th>Status</th><th>Priority</th><th>Deadline</th><th>Assigned driver</th><th>ETA</th><th></th></tr></thead>
+        <tbody>${ov.orders.map((o) => orderRow(o, ov)).join('') || `<tr><td colspan="8" class="muted">No active orders. Have a merchant mark an order ready.</td></tr>`}</tbody>
       </table></div>
     </div>
 
@@ -108,7 +136,8 @@ function orderRow(o: OrderDto, ov: Overview): string {
   const isOpen = expanded.has(o.id);
   const rows = `
     <tr>
-      <td><code>${esc(o.id.slice(-6))}</code></td>
+      <td><strong>${esc(o.code)}</strong><br><span class="muted">${esc(itemText(o))}</span></td>
+      <td>${esc(o.customerName)}<br><span class="muted">to (${o.dropoff.x}, ${o.dropoff.y})</span></td>
       <td>${statusChip(o.status)}</td>
       <td>${statusChip(o.priority)}</td>
       <td>${fmtTime(o.deadlineTs)}<br><span class="muted">${minutesUntil(o.deadlineTs)}m</span></td>
@@ -118,17 +147,19 @@ function orderRow(o: OrderDto, ov: Overview): string {
     </tr>`;
   if (!isOpen || !asg) return rows;
   const r = asg.reasoning;
+  const contrib = (r as { contributions?: Record<string, number> }).contributions;
   return rows + `
-    <tr><td colspan="7" style="background:#fbfbfa">
+    <tr><td colspan="8" style="background:#fbfbfa">
       <strong>${esc(r.rationale)}</strong>
       <ul class="reason-list">${r.explanation.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
-      ${r.rejected.length ? `<p class="muted">Rejected: ${r.rejected.map((x) => `${esc(x.driverId.slice(-4))} (${x.disqualifiers.join(', ')})`).join('; ')}</p>` : ''}
+      ${contrib ? `<p class="muted">Score breakdown: ${Object.entries(contrib).map(([k, v]) => `${esc(k)} ${v}`).join(' · ')} = <b>${asg.score}</b></p>` : ''}
+      ${r.rejected.length ? `<p class="muted">Not eligible: ${r.rejected.map((x) => `${esc(String(x.driverId))} (${x.disqualifiers.join(', ')})`).join('; ')}</p>` : ''}
     </td></tr>`;
 }
 
 function driverRow(d: DriverDto): string {
   return `<tr>
-    <td>${esc(d.name)}<br><code>${esc(d.id.slice(-6))}</code></td>
+    <td><strong>${esc(d.name)}</strong></td>
     <td>${esc(d.vehicleType)} · ${d.maxPackageSize}</td>
     <td>${statusChip(d.status)}</td>
     <td>${d.currentOrderCount}/${d.capacity}</td>
@@ -138,6 +169,7 @@ function driverRow(d: DriverDto): string {
 }
 
 function wire(el: HTMLElement, ov: Overview): void {
+  enableMapTooltips(el);
   el.querySelectorAll<HTMLButtonElement>('[data-toggle]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.toggle!;
     expanded.has(id) ? expanded.delete(id) : expanded.add(id);
@@ -151,13 +183,14 @@ function wire(el: HTMLElement, ov: Overview): void {
   el.querySelectorAll<HTMLButtonElement>('[data-offline]').forEach((b) => b.addEventListener('click', () =>
     act(() => post(`/sim/driver/${b.dataset.offline}/offline`), 'Driver taken offline — watch the Monitoring Agent')));
 
-  const firstAssigned = ov.orders.find((o) => o.delivery?.driverId && ['assigned', 'picked_up'].includes(o.delivery.status));
+  const firstAssigned = ov.orders.find((o) => o.delivery?.driverId
+    && ['assigned', 'en_route_pickup', 'picked_up', 'en_route_drop'].includes(o.delivery.status));
   const head = el.querySelector('.page-head .pill-row');
   if (firstAssigned && head && !head.querySelector('[data-act="traffic"]')) {
     const btn = document.createElement('button');
     btn.className = 'btn';
     btn.dataset.act = 'traffic';
-    btn.textContent = '⚠ Block a route';
+    btn.textContent = '⚠ Simulate traffic incident';
     btn.addEventListener('click', () => act(
       () => post('/sim/traffic', { blockRouteOf: firstAssigned.id }),
       'Road closed on the active route — watch the agents recover'));

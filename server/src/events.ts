@@ -71,7 +71,31 @@ function mapRow(r: Record<string, unknown>): AgentEvent {
   };
 }
 
-export async function listEvents(opts: { sinceId?: number; orderId?: string; limit?: number } = {}): Promise<AgentEvent[]> {
+const DRV_RE = /\bdrv_[a-z0-9]{6,40}\b/gi;
+const ORD_RE = /\bord_[a-z0-9]{6,40}\b/gi;
+
+/** Rewrite internal ids in an event message to human-friendly labels:
+ *  driver ids -> driver names, order ids -> short `#code`. */
+export async function humanizeEvents(events: AgentEvent[]): Promise<AgentEvent[]> {
+  const driverIds = new Set<string>();
+  for (const e of events) for (const m of e.message.matchAll(DRV_RE)) driverIds.add(m[0]);
+  const nameById = new Map<string, string>();
+  if (driverIds.size) {
+    const ids = [...driverIds];
+    const rows = await q<{ id: string; name: string }>(
+      `SELECT id, name FROM drivers WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+    for (const r of rows) nameById.set(r.id, r.name);
+  }
+  const shortOrder = (id: string) => `#${id.replace(/^ord_/, '').slice(-6).toUpperCase()}`;
+  return events.map((e) => ({
+    ...e,
+    message: e.message
+      .replace(DRV_RE, (id) => nameById.get(id) ?? id)
+      .replace(ORD_RE, shortOrder),
+  }));
+}
+
+export async function listEvents(opts: { sinceId?: number; orderId?: string; limit?: number; raw?: boolean } = {}): Promise<AgentEvent[]> {
   const clauses: string[] = [];
   const params: unknown[] = [];
   if (opts.sinceId !== undefined) { clauses.push('id > ?'); params.push(opts.sinceId); }
@@ -80,5 +104,6 @@ export async function listEvents(opts: { sinceId?: number; orderId?: string; lim
   const limit = Math.min(opts.limit ?? 200, 500);
   params.push(limit);
   const rows = await q<Record<string, unknown>>(`SELECT * FROM agent_events ${where} ORDER BY id DESC LIMIT ?`, params);
-  return rows.map(mapRow).reverse();
+  const events = rows.map(mapRow).reverse();
+  return opts.raw ? events : humanizeEvents(events);
 }

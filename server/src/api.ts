@@ -159,13 +159,25 @@ api.post('/merchant/orders', ...merchantOnly, h(async (req, res) => {
 
 api.post('/merchant/orders/:id/ready', ...merchantOnly, h(async (req, res) => {
   const order = await ownedOrderForMerchant(req, idParam(req.params.id, 'order id'));
-  if (order.status !== 'created') {
-    if (['ready', 'validated', 'dispatching', 'assigned'].includes(order.status)) {
-      return res.json({ order: await orderView((await orders.byId(order.id))!), note: 'already in dispatch' });
-    }
+
+  // Already has a driver and is in flight — nothing to (re)dispatch.
+  if (['assigned', 'picked_up', 'delivering'].includes(order.status)) {
+    const delivery = await deliveries.byOrderId(order.id);
+    return res.json({
+      order: await orderView(order),
+      dispatch: { status: 'reused', orderId: order.id },
+      delivery: delivery ? deliveryView(delivery) : null,
+      note: 'already assigned',
+    });
+  }
+  if (['delivered', 'cancelled', 'failed'].includes(order.status)) {
     throw conflict(`Order is ${order.status}, cannot mark ready`);
   }
-  await orders.setStatus(order.id, 'ready', 'created');
+
+  // created → ready; a ready/validated/dispatching order simply re-enters dispatch
+  // (covers a first attempt that found no driver or hit a transient error).
+  if (order.status === 'created') await orders.setStatus(order.id, 'ready', 'created');
+
   const idempotencyKey = req.header('idempotency-key') ?? null;
   const outcome = await coordinator.dispatchOrder(order.id, { idempotencyKey });
   const delivery = await deliveries.byOrderId(order.id);
@@ -183,7 +195,9 @@ api.get('/merchant/orders/:id', ...merchantOnly, h(async (req, res) => {
   res.json({
     order: await orderView(order),
     delivery: delivery ? deliveryView(delivery) : null,
-    assignedDriver: driver ? { name: driver.name, vehicleType: driver.vehicle_type, status: driver.status } : null,
+    assignedDriver: driver
+      ? { name: driver.name, vehicleType: driver.vehicle_type, status: driver.status, location: driver.lat != null ? { x: driver.lat, y: driver.lng } : null }
+      : null,
     route: delivery ? await activeRouteView(delivery.id) : null,
     events: await listEvents({ orderId: order.id, limit: 60 }),
   });
@@ -228,15 +242,28 @@ api.get('/customer/orders/:id', ...customerOnly, h(async (req, res) => {
 /* ------------------------------------------------------------------ driver */
 const driverOnly = [authenticate(true), requireRole('driver')];
 
+async function driverSelf(refId: string) {
+  const me = await drivers.byId(refId);
+  return me && me.lat != null
+    ? { location: { x: me.lat, y: me.lng }, status: me.status, name: me.name, vehicleType: me.vehicle_type }
+    : { location: null, status: me?.status ?? 'offline', name: me?.name ?? '', vehicleType: me?.vehicle_type ?? '' };
+}
+
 api.get('/driver/deliveries', ...driverOnly, h(async (req, res) => {
   const list = await deliveries.byDriver(req.user!.refId!);
   res.json({
+    me: await driverSelf(req.user!.refId!),
     deliveries: await Promise.all(list.map(async (d) => {
       const o = (await orders.byId(d.order_id))!;
+      const [items, cust, store] = await Promise.all([orders.items(o.id), customers.byId(o.customer_id), stores.byId(o.store_id)]);
       return {
         ...deliveryView(d),
-        order: { id: o.id, priority: o.priority, packageSize: o.package_size, deadlineTs: o.deadline_ts, items: await orders.items(o.id) },
-        pickup: { x: o.pickup_lat, y: o.pickup_lng },
+        order: {
+          code: `#${o.id.replace(/^ord_/, '').slice(-6).toUpperCase()}`,
+          priority: o.priority, packageSize: o.package_size, deadlineTs: o.deadline_ts, note: o.note, items,
+          customerName: cust?.name ?? 'Customer',
+        },
+        pickup: { x: o.pickup_lat, y: o.pickup_lng, name: store?.name ?? 'Merchant' },
         dropoff: { x: o.delivery_lat, y: o.delivery_lng },
         route: await activeRouteView(d.id),
       };
@@ -247,10 +274,15 @@ api.get('/driver/deliveries', ...driverOnly, h(async (req, res) => {
 api.get('/driver/deliveries/:id', ...driverOnly, h(async (req, res) => {
   const delivery = await ownedDeliveryForDriver(req, idParam(req.params.id, 'delivery id'));
   const o = (await orders.byId(delivery.order_id))!;
-  const store = await stores.byId(o.store_id);
+  const [store, cust, items] = await Promise.all([stores.byId(o.store_id), customers.byId(o.customer_id), orders.items(o.id)]);
   res.json({
     ...deliveryView(delivery),
-    order: { id: o.id, priority: o.priority, packageSize: o.package_size, volume: o.volume, deadlineTs: o.deadline_ts, note: o.note, items: await orders.items(o.id) },
+    me: await driverSelf(req.user!.refId!),
+    order: {
+      code: `#${o.id.replace(/^ord_/, '').slice(-6).toUpperCase()}`,
+      priority: o.priority, packageSize: o.package_size, volume: o.volume, deadlineTs: o.deadline_ts, note: o.note, items,
+      customerName: cust?.name ?? 'Customer',
+    },
     pickup: { x: o.pickup_lat, y: o.pickup_lng, name: store?.name ?? 'Merchant' },
     dropoff: { x: o.delivery_lat, y: o.delivery_lng },
     route: await activeRouteView(delivery.id),
@@ -365,6 +397,7 @@ api.post('/sim/traffic', ...simOnly, h(async (req, res) => {
     status: b.status ? enumVal(b, 'status', ['clear', 'moderate', 'heavy', 'closed'] as const) : undefined,
     delayMinutes: b.delayMinutes !== undefined ? int(b, 'delayMinutes', { min: 0, max: 120 }) : undefined,
     blockRouteOf: b.blockRouteOf ? idParam(b.blockRouteOf, 'order id') : undefined,
+    severity: b.severity ? enumVal(b, 'severity', ['minor', 'major'] as const) : undefined,
   });
   res.json(result);
 }));

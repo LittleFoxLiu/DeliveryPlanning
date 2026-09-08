@@ -24,7 +24,17 @@ describe('scoring engine', () => {
     expect(s.eligible).toBe(true);
     expect(s.score).toBeGreaterThan(0);
     expect(s.explanation.join(' ')).toMatch(/ETA to merchant/);
-    expect(Object.keys(s.contributions)).toEqual(['time', 'deadline', 'efficiency', 'availability', 'capacity']);
+    expect(Object.keys(s.contributions)).toEqual(['eta', 'efficiency', 'deadline', 'workload', 'vehicle', 'distance']);
+    // ETA is the dominant factor (40% of 100)
+    expect(s.contributions.eta).toBeGreaterThan(s.contributions.efficiency);
+  });
+
+  it('weights ETA above raw distance — the spec model', () => {
+    // driver very close to pickup but a long total delivery
+    const close = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_close' }), estimate(2, 70));
+    // driver farther from pickup but a much shorter total delivery
+    const fast = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_fast' }), estimate(14, 14));
+    expect(compareAssignments([close, fast]).winner?.driverId).toBe('drv_fast');
   });
 
   it('disqualifies a vehicle that cannot carry the package', () => {

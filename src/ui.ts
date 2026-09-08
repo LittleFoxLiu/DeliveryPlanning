@@ -35,6 +35,27 @@ export function minutesUntil(ts: string | null | undefined): number | null {
   return Math.round((t - Date.now()) / 60_000);
 }
 
+/** Parse a comma-separated items string like "Coffee ×2, Oat milk" into
+ *  [{name, qty}]. Accepts "x2", "×2", "*2" or "2x" quantity suffixes/prefixes. */
+export function parseItemsInput(raw: string): { name: string; qty: number }[] {
+  return String(raw || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 20)
+    .map((part) => {
+      let qty = 1;
+      let name = part;
+      const m = part.match(/^(.*?)[\s]*[x×*]\s*(\d{1,2})$/i) || part.match(/^(\d{1,2})\s*[x×*]\s*(.*)$/i);
+      if (m) {
+        if (/^\d/.test(m[1])) { qty = Number(m[1]); name = m[2].trim(); }
+        else { name = m[1].trim(); qty = Number(m[2]); }
+      }
+      return { name: name.slice(0, 80) || 'Item', qty: Math.min(Math.max(qty, 1), 99) };
+    })
+    .filter((i) => i.name);
+}
+
 /** Value for an <input type="datetime-local">, in LOCAL wall-clock time
  *  (not UTC — datetime-local has no timezone). */
 export function localDatetimeValue(msFromNow: number): string {
@@ -72,6 +93,22 @@ export function statusChip(status: string): string {
     available: 'green', on_route: 'blue', break: 'orange', offline: 'red',
   };
   return `<span class="chip ${map[status] || 'grey'}">${esc(status.replace(/_/g, ' '))}</span>`;
+}
+
+/** Customer-facing order status labels (spec vocabulary). */
+const CUSTOMER_LABEL: Record<string, string> = {
+  created: 'Placed', ready: 'Preparing', validated: 'Preparing', dispatching: 'Finding a driver',
+  assigned: 'Driver assigned', picked_up: 'Picked up', delivering: 'In transit', en_route_drop: 'In transit',
+  en_route_pickup: 'Driver assigned', delivered: 'Delivered', cancelled: 'Cancelled', failed: 'Delayed',
+};
+export function customerChip(orderStatus: string, deliveryStatus?: string): string {
+  const s = deliveryStatus === 'en_route_drop' || deliveryStatus === 'picked_up'
+    ? deliveryStatus : orderStatus;
+  const label = CUSTOMER_LABEL[s] || CUSTOMER_LABEL[orderStatus] || orderStatus;
+  const colorKey = s === 'delivered' ? 'green' : s === 'failed' || s === 'cancelled' ? 'red'
+    : ['picked_up', 'delivering', 'en_route_drop'].includes(s) ? 'teal'
+      : ['assigned', 'en_route_pickup'].includes(s) ? 'blue' : 'grey';
+  return `<span class="chip ${colorKey}">${esc(label)}</span>`;
 }
 
 export function agentBadge(agent: string): string {

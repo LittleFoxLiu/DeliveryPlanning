@@ -1,10 +1,15 @@
 import type { OrderDto } from '../types';
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
-import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue } from '../ui';
+import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, parseItemsInput } from '../ui';
 
 interface MerchantOrders { orders: OrderDto[] }
-interface OrderDetail { order: OrderDto; delivery: OrderDto['delivery']; assignedDriver: { name: string; vehicleType: string; status: string } | null; events: { agent: string; message: string; ts: string }[] }
+interface OrderDetail {
+  order: OrderDto;
+  delivery: OrderDto['delivery'];
+  assignedDriver: { name: string; vehicleType: string; status: string; location: { x: number; y: number } | null } | null;
+  events: { agent: string; message: string; ts: string }[];
+}
 
 let selected: string | null = null;
 let stores: { id: string; name: string; pickup: { x: number; y: number } }[] = [];
@@ -36,21 +41,25 @@ function view(orders: OrderDto[], detail: OrderDetail | null): string {
         <div class="card">
           <div class="card-head"><h2>Orders</h2></div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Order</th><th>Customer drop</th><th>Status</th><th>Deadline</th><th></th></tr></thead>
+            <thead><tr><th>Order</th><th>Customer</th><th>Status</th><th>Deadline</th><th></th></tr></thead>
             <tbody>${orders.map((o) => `
               <tr data-open="${esc(o.id)}" style="cursor:pointer;${o.id === selected ? 'background:#faf3f1' : ''}">
-                <td><code>${esc(o.id.slice(-6))}</code><br><span class="muted">${o.items.map((i) => esc(i.name)).join(', ')}</span></td>
-                <td>(${o.dropoff.x}, ${o.dropoff.y})</td>
+                <td><strong>${esc(o.code)}</strong><br><span class="muted">${o.items.map((i) => `${esc(i.name)}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ') || '—'}</span></td>
+                <td>${esc(o.customerName)}<br><span class="muted">to (${o.dropoff.x}, ${o.dropoff.y})</span></td>
                 <td>${statusChip(o.status)}</td>
                 <td>${fmtTime(o.deadlineTs)}</td>
-                <td>${o.status === 'created' ? `<button class="btn primary sm" data-ready="${esc(o.id)}">Mark ready</button>` : ''}</td>
+                <td>${o.status === 'created'
+                  ? `<button class="btn primary sm" data-ready="${esc(o.id)}">Mark ready</button>`
+                  : ['ready', 'validated', 'dispatching'].includes(o.status)
+                    ? `<button class="btn sm" data-ready="${esc(o.id)}">Retry dispatch</button>`
+                    : ''}</td>
               </tr>`).join('') || `<tr><td colspan="5" class="muted">No orders yet.</td></tr>`}</tbody>
           </table></div>
         </div>
         ${newOrderCard()}
       </div>
       <div class="card">
-        <div class="card-head"><h2>${detail ? `Order ${esc(detail.order.id.slice(-6))}` : 'Select an order'}</h2></div>
+        <div class="card-head"><h2>${detail ? `Order ${esc(detail.order.code)}` : 'Select an order'}</h2></div>
         ${detail ? detailBody(detail) : '<p class="muted">Pick an order to see its dispatch status and the agent trail.</p>'}
       </div>
     </div>`;
@@ -58,13 +67,17 @@ function view(orders: OrderDto[], detail: OrderDetail | null): string {
 
 function detailBody(d: OrderDetail): string {
   const mins = minutesUntil(d.delivery?.etaTs);
+  const drv = d.assignedDriver;
   return `
     <dl class="kv">
+      <dt>Customer</dt><dd>${esc(d.order.customerName)}</dd>
+      <dt>Deliver to</dt><dd>(${d.order.dropoff.x}, ${d.order.dropoff.y})</dd>
+      <dt>Items</dt><dd>${d.order.items.map((i) => `${esc(i.name)}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ') || '—'}</dd>
       <dt>Status</dt><dd>${statusChip(d.order.status)}</dd>
       <dt>Priority</dt><dd>${esc(d.order.priority)}</dd>
       <dt>Package</dt><dd>${esc(d.order.packageSize)} · vol ${d.order.volume}</dd>
       <dt>Deadline</dt><dd>${fmtTime(d.order.deadlineTs)} (${minutesUntil(d.order.deadlineTs)}m)</dd>
-      <dt>Driver</dt><dd>${d.assignedDriver ? `${esc(d.assignedDriver.name)} · ${esc(d.assignedDriver.vehicleType)}` : '—'}</dd>
+      <dt>Driver</dt><dd>${drv ? `${esc(drv.name)} · ${esc(drv.vehicleType)}${drv.location ? ` · at (${drv.location.x}, ${drv.location.y})` : ''}` : '—'}</dd>
       <dt>ETA</dt><dd>${d.delivery?.etaTs ? `${fmtTime(d.delivery.etaTs)}${mins !== null ? ` (${mins}m)` : ''}` : '—'}</dd>
     </dl>
     <h3 style="margin-top:16px;font-size:13px">Agent trail</h3>
@@ -79,6 +92,7 @@ function newOrderCard(): string {
       <label class="full">Store<select name="storeId">${stores.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</select></label>
       <label>Customer name<input name="customerName" value="Sofia Lin" required></label>
       <label>Priority<select name="priority"><option value="standard">standard</option><option value="express">express</option></select></label>
+      <label class="full">Items <span class="muted">(comma-separated)</span><input name="items" value="Fresh coffee beans, Oat milk ×2" required></label>
       <label>Drop X (0-20)<input name="deliveryLat" type="number" min="0" max="20" step="1" value="7" required></label>
       <label>Drop Y (0-20)<input name="deliveryLng" type="number" min="0" max="20" step="1" value="4" required></label>
       <label>Package<select name="packageSize"><option>small</option><option>medium</option><option>large</option></select></label>
@@ -98,9 +112,15 @@ function wire(el: HTMLElement, orders: OrderDto[]): void {
     e.stopPropagation();
     b.disabled = true;
     try {
-      const res = await post<{ dispatch: { status: string; decision?: { driverId: string; score: number } } }>(`/merchant/orders/${b.dataset.ready}/ready`, {}, { 'idempotency-key': `ready-${b.dataset.ready}` });
-      const dec = res.dispatch.decision;
-      toast(res.dispatch.status === 'assigned' && dec ? `Assigned to a driver (score ${dec.score})` : `Dispatch: ${res.dispatch.status}`);
+      const res = await post<{ dispatch: { status: string; decision?: { driverId: string; score: number; rationale?: string }; issues?: string[] } }>(
+        `/merchant/orders/${b.dataset.ready}/ready`, {}, { 'idempotency-key': `ready-${b.dataset.ready}-${Date.now()}` });
+      const d = res.dispatch;
+      const dec = d.decision;
+      if (d.status === 'assigned' && dec) toast(`Assigned to a driver (score ${dec.score})`);
+      else if (d.status === 'reused') toast('Already assigned to a driver');
+      else if (d.status === 'no_driver') toast(`No driver available — ${dec?.rationale || 'try again shortly'}`, 'error');
+      else if (d.status === 'invalid') toast(`Cannot dispatch: ${(d.issues || []).join(', ') || 'order invalid'}`, 'error');
+      else toast(`Dispatch: ${d.status}`);
       selected = b.dataset.ready!;
       renderMerchant(el);
     } catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); b.disabled = false; }
@@ -109,12 +129,14 @@ function wire(el: HTMLElement, orders: OrderDto[]): void {
   form?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
+    const items = parseItemsInput(String(fd.get('items') || ''));
     const body = {
       storeId: fd.get('storeId'), customerName: fd.get('customerName'), priority: fd.get('priority'),
       deliveryLat: Number(fd.get('deliveryLat')), deliveryLng: Number(fd.get('deliveryLng')),
       packageSize: fd.get('packageSize'),
       deadlineTs: new Date(String(fd.get('deadlineTs'))).toISOString(),
-      volume: 1,
+      items,
+      volume: Math.max(1, items.reduce((n, i) => n + i.qty, 0)),
     };
     try { await post('/merchant/orders', body); toast('Order created'); renderMerchant(el); }
     catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); }
