@@ -183,16 +183,24 @@ export function injectTraffic(input: {
         });
         return { closed: [], updated: changed };
       }
+      // Close a short WALL along the route — the first few real segments on the
+      // driver's remaining path — so a single-node detour is impossible, then
+      // gridlock the surrounding block. A sustained delay the Monitoring Agent
+      // keeps seeing on every pass.
       await roads.setStatus(primary.id, 'closed', 0);
       changed.push(primary.id);
-      // Gridlock the surrounding block (~2 cells) so the driver can't just nip
-      // around it — a sustained delay the Monitoring Agent will keep seeing.
+      let closedOnPath = 0;
+      for (let k = 0; k < path.length - 1 && closedOnPath < 2; k++) {
+        if (path[k].x === path[k + 1].x && path[k].y === path[k + 1].y) continue;
+        const rid = await findRoadId(path[k], path[k + 1]);
+        if (rid && !changed.includes(rid)) { await roads.setStatus(rid, 'closed', 0); changed.push(rid); closedOnPath++; }
+      }
       const cx = (primary.ax + primary.bx) / 2;
       const cy = (primary.ay + primary.by) / 2;
       for (const r of await roads.all()) {
-        if (r.id === primary.id || r.status === 'closed') continue;
+        if (changed.includes(r.id) || r.status === 'closed') continue;
         const near = Math.hypot((r.ax + r.bx) / 2 - cx, (r.ay + r.by) / 2 - cy);
-        if (near <= 2.6) { await roads.setStatus(r.id, 'heavy', 18); changed.push(r.id); }
+        if (near <= 3) { await roads.setStatus(r.id, 'heavy', 20); changed.push(r.id); }
       }
       await emitAgentEvent({
         agent: 'TrafficFeed', eventType: 'traffic_updated',
