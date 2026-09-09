@@ -48,7 +48,7 @@ export const orderTools = {
     })) {
       if (!Number.isFinite(v) || v < 0 || v > SIZE) issues.push(`coord_out_of_bounds:${k}`);
     }
-    if (o.pickup_lat === o.delivery_lat && o.pickup_lng === o.delivery_lng) issues.push('pickup_equals_dropoff');
+    if (Math.abs(o.pickup_lat - o.delivery_lat) < 1 && Math.abs(o.pickup_lng - o.delivery_lng) < 1) issues.push('pickup_equals_dropoff');
     if (o.volume < 1) issues.push('volume_invalid');
     const deadlineMs = Date.parse(o.deadline_ts);
     if (!Number.isFinite(deadlineMs)) issues.push('deadline_invalid');

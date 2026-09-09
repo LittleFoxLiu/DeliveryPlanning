@@ -141,6 +141,7 @@ api.post('/merchant/orders', ...merchantOnly, h(async (req, res) => {
   const storeId = idParam(b.storeId, 'storeId');
   const store = await stores.byId(storeId);
   if (!store || store.merchant_id !== req.user!.refId) throw forbidden('Not your store');
+  const dest = deliveryPoint(b, store);
   const customer = await customers.create(str(b, 'customerName', { min: 1, max: 120 }));
   const order = await orders.create({
     merchant_id: req.user!.refId!,
@@ -148,8 +149,8 @@ api.post('/merchant/orders', ...merchantOnly, h(async (req, res) => {
     customer_id: customer.id,
     pickup_lat: store.pickup_lat,
     pickup_lng: store.pickup_lng,
-    delivery_lat: coord(b, 'deliveryLat'),
-    delivery_lng: coord(b, 'deliveryLng'),
+    delivery_lat: dest.lat,
+    delivery_lng: dest.lng,
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
     package_size: enumVal(b, 'packageSize', ['small', 'medium', 'large'] as const, 'small'),
@@ -214,14 +215,15 @@ api.post('/customer/orders', ...customerOnly, h(async (req, res) => {
   const storeId = idParam(b.storeId, 'storeId');
   const store = await stores.byId(storeId);
   if (!store) throw notFound('Store not found');
+  const dest = deliveryPoint(b, store);
   const order = await orders.create({
     merchant_id: store.merchant_id,
     store_id: storeId,
     customer_id: req.user!.refId!,
     pickup_lat: store.pickup_lat,
     pickup_lng: store.pickup_lng,
-    delivery_lat: coord(b, 'deliveryLat'),
-    delivery_lng: coord(b, 'deliveryLng'),
+    delivery_lat: dest.lat,
+    delivery_lng: dest.lng,
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
     package_size: enumVal(b, 'packageSize', ['small', 'medium', 'large'] as const, 'small'),
@@ -419,6 +421,17 @@ api.post('/sim/reset', ...simOnly, h(async (_req, res) => {
 }));
 
 /* --------------------------------------------------------------- helpers */
+/** Validate a delivery destination against the store's pickup point so the
+ *  order can't be dispatched as a zero-distance no-op. */
+function deliveryPoint(b: Record<string, unknown>, store: { pickup_lat: number; pickup_lng: number }): { lat: number; lng: number } {
+  const lat = coord(b, 'deliveryLat');
+  const lng = coord(b, 'deliveryLng');
+  if (Math.abs(lat - store.pickup_lat) < 1 && Math.abs(lng - store.pickup_lng) < 1) {
+    throw badRequest(`The delivery address (${lat}, ${lng}) is at the pickup location — choose a destination away from the store.`);
+  }
+  return { lat, lng };
+}
+
 function parseItems(raw: unknown): { name: string; qty: number }[] {
   if (!Array.isArray(raw)) return [];
   return raw.slice(0, 20).map((it) => {

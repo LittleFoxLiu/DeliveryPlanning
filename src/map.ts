@@ -94,12 +94,19 @@ export function enableMapTooltips(root: HTMLElement | Document = document): void
       tip.innerHTML = `<strong>${head}</strong>${rest.map((l) => `<span>${l}</span>`).join('')}`;
       tip.hidden = false;
       const b = wrap.getBoundingClientRect();
-      let left = ev.clientX - b.left + 14;
-      let top = ev.clientY - b.top + 14;
-      if (left + 220 > b.width) left = ev.clientX - b.left - 224;
-      if (top + tip.offsetHeight > b.height) top = ev.clientY - b.top - tip.offsetHeight - 10;
-      tip.style.left = `${Math.max(4, left)}px`;
-      tip.style.top = `${Math.max(4, top)}px`;
+      const px = ev.clientX - b.left;
+      const py = ev.clientY - b.top;
+      const gap = 8;
+      const w = tip.offsetWidth || 200;
+      const hgt = tip.offsetHeight || 40;
+      // sit just to the right of and vertically centred on the pointer; flip
+      // side / clamp only when it would leave the map
+      let left = px + gap;
+      if (left + w > b.width - 2) left = px - gap - w;
+      let top = py - hgt / 2;
+      top = Math.max(2, Math.min(top, b.height - hgt - 2));
+      tip.style.left = `${Math.max(2, left)}px`;
+      tip.style.top = `${top}px`;
     };
     wrap.addEventListener('mousemove', (ev) => {
       const el = (ev.target as Element).closest('.map-marker');

@@ -87,6 +87,38 @@ describe('end-to-end dispatch', () => {
   });
 });
 
+describe('driver waypoint sync', () => {
+  it('moves the driver to the pickup on "picked up" and to the customer on "delivered"', async () => {
+    const harbor = await login(ctx.base, 'harbor@demo.test');
+    const admin = await login(ctx.base, 'admin@demo.test');
+    const orderId = (await createdOrders(harbor)).find((o) => o.status === 'created')!.id;
+    const ready = await c.post(`/merchant/orders/${orderId}/ready`, {}, harbor);
+    const driverId = (ready.body.dispatch as { decision: { driverId: string } }).decision.driverId;
+
+    let driverToken = '';
+    for (let i = 1; i <= 5; i++) {
+      const tok = await login(ctx.base, `driver${i}@demo.test`);
+      if (((await c.get('/auth/me', tok)).body.user as { refId: string }).refId === driverId) { driverToken = tok; break; }
+    }
+    const dv = (await c.get('/driver/deliveries', driverToken)).body.deliveries[0] as {
+      id: string; pickup: { x: number; y: number }; dropoff: { x: number; y: number };
+    };
+
+    await c.post(`/driver/deliveries/${dv.id}/accept`, {}, driverToken);
+    // from wherever they were, confirming pickup snaps them onto the pickup
+    await c.post(`/driver/deliveries/${dv.id}/status`, { action: 'picked_up' }, driverToken);
+    let me = (await c.get('/driver/deliveries', driverToken)).body.me as { location: { x: number; y: number } };
+    expect(me.location).toMatchObject({ x: dv.pickup.x, y: dv.pickup.y });
+
+    await c.post(`/driver/deliveries/${dv.id}/status`, { action: 'delivered' }, driverToken);
+    me = (await c.get('/driver/deliveries', driverToken)).body.me as { location: { x: number; y: number } };
+    expect(me.location).toMatchObject({ x: dv.dropoff.x, y: dv.dropoff.y });
+
+    const detail = await c.get(`/admin/orders/${orderId}`, admin);
+    expect((detail.body.order as { status: string }).status).toBe('delivered');
+  });
+});
+
 describe('monitoring & remediation', () => {
   it('reassigns when the assigned driver goes offline mid-delivery', async () => {
     const harbor = await login(ctx.base, 'harbor@demo.test');

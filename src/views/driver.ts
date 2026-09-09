@@ -88,7 +88,7 @@ function card(d: DriverDelivery): string {
     ['picked_up', 'en_route_drop'].includes(d.status) ? `<button class="btn primary" data-do="delivered" data-id="${esc(d.id)}">Mark delivered</button>` : '';
   return `<div class="card">
     <div class="card-head"><h2>Order ${esc(d.order.code)}</h2>${statusChip(d.status)}</div>
-    <div class="next-step">➜ Head to <strong>${esc(t.label)}</strong> — (${t.at.x}, ${t.at.y})</div>
+    <div class="next-step">➜ ${d.status === 'en_route_pickup' ? 'Collecting at' : ['picked_up', 'en_route_drop'].includes(d.status) ? 'Delivering to' : 'Head to'} <strong>${esc(t.label)}</strong> — (${t.at.x}, ${t.at.y})</div>
     <dl class="kv" style="margin-top:10px">
       <dt>Customer</dt><dd>${esc(d.order.customerName)}</dd>
       <dt>Pickup</dt><dd>${esc(d.pickup.name || 'Merchant')} — (${d.pickup.x}, ${d.pickup.y})</dd>
