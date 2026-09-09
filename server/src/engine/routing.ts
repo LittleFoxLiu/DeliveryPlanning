@@ -196,7 +196,7 @@ export function compareRoutes(named: { label: string; result: RouteResult }[]): 
     reachable: result.reachable,
   }));
   const reachable = candidates.filter((c) => c.reachable);
-  reachable.sort((a, b) => a.etaMinutes - b.etaMinutes);
+  reachable.sort((a, b) => (a.distanceKm - b.distanceKm) || (a.etaMinutes - b.etaMinutes));
   return { candidates, best: reachable[0]?.label ?? null };
 }
 

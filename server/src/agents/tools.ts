@@ -4,8 +4,8 @@
  * and every call is recorded. Execution tools live in `execution.ts`.
  */
 import { orders, drivers, deliveries, stores, customers, merchants, roads } from '../repo.js';
-import { estimateDeliveryTime, calculateRoute, type Point } from '../engine/routing.js';
-import { estimateGeoDelivery } from '../engine/geoRouting.js';
+import { estimateDeliveryTime, type Point } from '../engine/routing.js';
+import { calculateGeoRoute, estimateGeoDelivery } from '../engine/geoRouting.js';
 import { scoreDriver, compareAssignments, type ScoreBreakdown } from '../engine/scoring.js';
 import { driverAgent } from './driverAgent.js';
 import { orderAgent } from './orderAgent.js';
@@ -106,7 +106,7 @@ export const tDriverState = defineTool({
 
 export const tEstimateDelivery = defineTool({
   name: 'routing.estimate_delivery',
-  description: 'Authoritative driver→pickup→customer route, ETA, distance, traffic penalty (Dijkstra shortest-time).',
+  description: 'Authoritative geo-routed driver→pickup→customer distance and ETA; traffic is currently ignored.',
   access: 'read',
   allowed: ['RoutingAgent', 'DispatchAgent'],
   input: (raw) => {
@@ -118,16 +118,13 @@ export const tEstimateDelivery = defineTool({
   },
   summariseInput: (i) => `${i.driverId} → ${i.orderId}`,
   run: async ({ driverId, orderId }) => {
-    const [d, o, segs] = await Promise.all([drivers.byId(driverId), orders.byId(orderId), roads.segments()]);
+    const [d, o] = await Promise.all([drivers.byId(driverId), orders.byId(orderId)]);
     if (!d || d.lat == null) throw new Error('driver_position_unknown');
     if (!o) throw new Error('order_not_found');
     const store = await stores.byId(o.store_id);
     const est = d.geo_lat != null && d.geo_lng != null && store?.geo_lat != null && store.geo_lng != null && o.delivery_geo_lat != null && o.delivery_geo_lng != null
       ? await estimateGeoDelivery({ lat: d.geo_lat, lon: d.geo_lng }, { lat: store.geo_lat, lon: store.geo_lng }, { lat: o.delivery_geo_lat, lon: o.delivery_geo_lng })
-      : estimateDeliveryTime(
-      { x: d.lat, y: d.lng as number },
-      { x: o.pickup_lat, y: o.pickup_lng }, { x: o.delivery_lat, y: o.delivery_lng }, segs,
-    );
+      : { toPickup: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, toDropoff: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, handlingMinutes: 3, totalMinutes: Infinity, totalDistanceKm: Infinity, reachable: false };
     return {
       reachable: est.reachable,
       etaToPickupMin: est.reachable ? est.toPickup.etaMinutes : null,
@@ -175,7 +172,7 @@ export const tScoreCandidates = defineTool({
   },
   summariseInput: (i) => `${i.candidates.length} candidates for ${i.orderId}`,
   run: async ({ orderId, candidates }): Promise<{ scored: ScoredCandidate[]; winnerId: string | null; rationale: string; margin: number }> => {
-    const [order, segs, fleet] = await Promise.all([orders.byId(orderId), roads.segments(), drivers.all()]);
+    const [order, fleet] = await Promise.all([orders.byId(orderId), drivers.all()]);
     if (!order) throw new Error('order_not_found');
     const byId = new Map(fleet.map((d) => [d.id, d]));
     const scored: ScoredCandidate[] = [];
@@ -185,10 +182,7 @@ export const tScoreCandidates = defineTool({
       const store = await stores.byId(order.store_id);
       const est = d.geo_lat != null && d.geo_lng != null && store?.geo_lat != null && store.geo_lng != null && order.delivery_geo_lat != null && order.delivery_geo_lng != null
         ? await estimateGeoDelivery({ lat: d.geo_lat, lon: d.geo_lng }, { lat: store.geo_lat, lon: store.geo_lng }, { lat: order.delivery_geo_lat, lon: order.delivery_geo_lng })
-        : estimateDeliveryTime(
-          { x: d.lat, y: d.lng as number },
-          { x: order.pickup_lat, y: order.pickup_lng }, { x: order.delivery_lat, y: order.delivery_lng }, segs,
-        );
+        : { toPickup: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, toDropoff: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, handlingMinutes: 3, totalMinutes: Infinity, totalDistanceKm: Infinity, reachable: false };
       const breakdown = scoreDriver(
         { orderId: order.id, packageSize: order.package_size, volume: order.volume, priority: order.priority, deadlineTs: order.deadline_ts },
         { driverId: d.id, name: d.name, status: d.status, vehicleType: d.vehicle_type, maxPackageSize: d.max_package_size, capacity: d.capacity, currentOrderCount: d.current_order_count },
@@ -213,22 +207,21 @@ export const tAssessDelivery = defineTool({
   run: async ({ deliveryId }) => {
     const dv = await deliveries.byId(deliveryId);
     if (!dv) throw new Error('delivery_not_found');
-    const [order, driver, segs] = await Promise.all([
-      orders.byId(dv.order_id), dv.driver_id ? drivers.byId(dv.driver_id) : Promise.resolve(undefined), roads.segments(),
+    const [order, driver] = await Promise.all([
+      orders.byId(dv.order_id), dv.driver_id ? drivers.byId(dv.driver_id) : Promise.resolve(undefined),
     ]);
     if (!order) throw new Error('order_not_found');
     const phase: 'to_pickup' | 'to_dropoff' = ['picked_up', 'en_route_drop'].includes(dv.status) ? 'to_dropoff' : 'to_pickup';
     if (!driver || driver.status === 'offline' || driver.lat == null) {
       return { phase, driverAvailable: false, reachable: false, projectedTotalMin: null, deadlineMs: Date.parse(order.deadline_ts), missesDeadline: true, slipMin: 9999 };
     }
-    const pos: Point = { x: driver.lat, y: driver.lng as number };
-    let projected: number;
-    if (phase === 'to_dropoff') {
-      projected = calculateRoute(pos, { x: order.delivery_lat, y: order.delivery_lng }, segs).etaMinutes;
-    } else {
-      const e = estimateDeliveryTime(pos, { x: order.pickup_lat, y: order.pickup_lng }, { x: order.delivery_lat, y: order.delivery_lng }, segs);
-      projected = e.totalMinutes;
-    }
+    const store = await stores.byId(order.store_id);
+    const hasGeo = driver.geo_lat != null && driver.geo_lng != null && store?.geo_lat != null && store.geo_lng != null
+      && order.delivery_geo_lat != null && order.delivery_geo_lng != null;
+    if (!hasGeo) return { phase, driverAvailable: true, reachable: false, projectedTotalMin: null, deadlineMs: Date.parse(order.deadline_ts), missesDeadline: true, slipMin: 9999 };
+    const projected = phase === 'to_dropoff'
+      ? (await calculateGeoRoute({ lat: driver.geo_lat!, lon: driver.geo_lng! }, { lat: order.delivery_geo_lat!, lon: order.delivery_geo_lng! })).etaMinutes
+      : (await estimateGeoDelivery({ lat: driver.geo_lat!, lon: driver.geo_lng! }, { lat: store.geo_lat!, lon: store.geo_lng! }, { lat: order.delivery_geo_lat!, lon: order.delivery_geo_lng! })).totalMinutes;
     const reachable = Number.isFinite(projected);
     const deadlineMs = Date.parse(order.deadline_ts);
     const projectedDoneMs = Date.now() + (reachable ? projected * 60_000 : 9e12);

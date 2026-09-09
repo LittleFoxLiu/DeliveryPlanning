@@ -1,11 +1,11 @@
-import { roads, traffic, stores, type OrderRow, type DeliveryRow } from '../repo.js';
+import { roads, traffic, stores, drivers, type OrderRow, type DeliveryRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
 import {
   calculateRoute, calculateEta, calculateDistance, estimateDeliveryTime, compareRoutes,
-  type Point, type RouteResult, type DeliveryEstimate, type Segment,
+  type Point, type RouteResult, type DeliveryEstimate,
 } from '../engine/routing.js';
 import type { Candidate } from './driverAgent.js';
-import { estimateGeoDelivery } from '../engine/geoRouting.js';
+import { calculateGeoRoute, estimateGeoDelivery } from '../engine/geoRouting.js';
 
 const NAME = 'RoutingAgent';
 
@@ -47,9 +47,9 @@ export const routingAgent = {
   tools: routingTools,
 
   /** Calculate the authoritative driver → pickup → customer route + ETA for
-   *  every candidate. Traffic and closed roads are baked into the grid costs. */
+   *  every candidate using geo routing. Driver selection is distance-first;
+   *  traffic is intentionally ignored for now. */
   async computeCandidateRoutes(order: OrderRow, candidates: Candidate[], cycleId: string, quiet = false): Promise<RoutedCandidate[]> {
-    const segs: Segment[] = await roads.segments();
     const pickup: Point = { x: order.pickup_lat, y: order.pickup_lng };
     const dropoff: Point = { x: order.delivery_lat, y: order.delivery_lng };
     const store = await stores.byId(order.store_id);
@@ -57,7 +57,7 @@ export const routingAgent = {
       candidate,
       estimate: candidate.driver.geo_lat != null && candidate.driver.geo_lng != null && store?.geo_lat != null && store.geo_lng != null && order.delivery_geo_lat != null && order.delivery_geo_lng != null
         ? await estimateGeoDelivery({ lat: candidate.driver.geo_lat, lon: candidate.driver.geo_lng }, { lat: store.geo_lat, lon: store.geo_lng }, { lat: order.delivery_geo_lat, lon: order.delivery_geo_lng })
-        : estimateDeliveryTime({ x: candidate.location.lat, y: candidate.location.lng }, pickup, dropoff, segs),
+        : { toPickup: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, toDropoff: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, handlingMinutes: 3, totalMinutes: Infinity, totalDistanceKm: Infinity, reachable: false },
     })));
 
     const comparison = compareRoutes(
@@ -92,16 +92,20 @@ export const routingAgent = {
   /** Recalculate a route for an in-flight delivery from the driver's current
    *  position. Returns the new route or a "no viable route" signal. */
   async recalculate(
-    delivery: DeliveryRow, order: OrderRow, currentPos: Point, phase: 'to_pickup' | 'to_dropoff', cycleId: string,
+    delivery: DeliveryRow, order: OrderRow, _currentPos: Point, phase: 'to_pickup' | 'to_dropoff', cycleId: string,
   ): Promise<{ ok: boolean; route?: RouteResult; etaMinutes: number; reason?: string }> {
-    const segs = await roads.segments();
-    const target: Point = phase === 'to_pickup'
-      ? { x: order.pickup_lat, y: order.pickup_lng }
-      : { x: order.delivery_lat, y: order.delivery_lng };
-    const route = calculateRoute(currentPos, target, segs);
+    if (!delivery.driver_id) return { ok: false, etaMinutes: Infinity, reason: 'driver_unavailable' };
+    const [driver, store] = await Promise.all([drivers.byId(delivery.driver_id), stores.byId(order.store_id)]);
+    const hasGeo = driver?.geo_lat != null && driver.geo_lng != null && store?.geo_lat != null && store.geo_lng != null
+      && order.delivery_geo_lat != null && order.delivery_geo_lng != null;
+    if (!hasGeo) return { ok: false, etaMinutes: Infinity, reason: 'geo_route_unavailable' };
+    const geoDriver = { lat: driver.geo_lat!, lon: driver.geo_lng! };
+    const geoPickup = { lat: store.geo_lat!, lon: store.geo_lng! };
+    const geoDropoff = { lat: order.delivery_geo_lat!, lon: order.delivery_geo_lng! };
+    const route = phase === 'to_pickup' ? await calculateGeoRoute(geoDriver, geoPickup) : await calculateGeoRoute(geoDriver, geoDropoff);
     let etaMinutes = route.etaMinutes;
     if (phase === 'to_pickup') {
-      const leg2 = calculateRoute({ x: order.pickup_lat, y: order.pickup_lng }, { x: order.delivery_lat, y: order.delivery_lng }, segs);
+      const leg2 = await calculateGeoRoute(geoPickup, geoDropoff);
       etaMinutes = route.reachable && leg2.reachable ? Number((route.etaMinutes + 3 + leg2.etaMinutes).toFixed(1)) : Infinity;
     }
 
@@ -116,8 +120,7 @@ export const routingAgent = {
 
     await emitAgentEvent({
       cycleId, agent: NAME, eventType: 'route_recalculated', orderId: order.id, deliveryId: delivery.id,
-      message: `Alternative route found — new ETA ${Number.isFinite(etaMinutes) ? `${etaMinutes} min` : 'n/a'}, `
-        + `${route.trafficPenaltyMinutes} min traffic penalty`,
+      message: `Distance-first route found — new ETA ${Number.isFinite(etaMinutes) ? `${etaMinutes} min` : 'n/a'}`,
       data: { distanceKm: route.distanceKm, etaMinutes, trafficPenaltyMinutes: route.trafficPenaltyMinutes, path: route.path },
     });
     return { ok: true, route, etaMinutes };

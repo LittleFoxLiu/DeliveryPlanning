@@ -1,9 +1,9 @@
-import type { OrderDto, DriverDto, AgentEvent, RoadSeg } from '../types';
+import type { OrderDto, DriverDto, AgentEvent } from '../types';
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil } from '../ui';
-import { renderMap, routeToPath, enableMapTooltips, type MapMarker, type MapPath } from '../map';
-import { mountOverviewMap } from '../geoMap';
+import { enableMapTooltips } from '../map';
+import { mountOverviewMap, searchNominatim } from '../geoMap';
 import { renderAdminOps } from './adminOps';
 import { renderAdminEval } from './adminEval';
 
@@ -24,9 +24,7 @@ interface Reasoning {
 }
 interface Membership { inviteCode: string; requests: { id: string; email: string; name: string; status: string }[] }
 
-const ROUTE_COLORS = ['#f26249', '#159c99', '#5277d7', '#9b6dd1', '#e0902a', '#3f9d6b'];
 const itemText = (o: OrderDto) => o.items.map((it) => `${it.name}${it.qty > 1 ? ` ×${it.qty}` : ''}`).join(', ') || '—';
-let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
 let expanded = new Set<string>();
 let created: { kind: string; name: string; email: string; password: string }[] = [];
 
@@ -37,7 +35,6 @@ export async function renderAdmin(el: HTMLElement, _user: unknown, page = 'overv
   if (page === 'evaluation') return renderAdminEval(el);
   resetSig('admin');
   currentPage = page;
-  if (!grid.roads.length) { try { grid = await get('/meta/grid'); } catch { /* retry next poll */ } }
   const draw = async () => {
     try {
       const [ov, membership] = await Promise.all([get<Overview>('/admin/overview'), get<Membership>('/admin/membership')]);
@@ -73,51 +70,12 @@ function overviewPage(ov: Overview): string {
   const availableDrivers = ov.drivers.filter((d) => d.status === 'available').length;
   const activeDeliveries = ov.deliveries.filter((d) => d && !['delivered', 'cancelled', 'failed'].includes(d.status)).length;
 
-  const markers: MapMarker[] = [];
-  const paths: MapPath[] = [];
-  const ordersByDriver = new Map<string, OrderDto[]>();
-  ov.orders.forEach((o) => {
-    if (o.delivery?.driverId) {
-      const arr = ordersByDriver.get(o.delivery.driverId) ?? [];
-      arr.push(o); ordersByDriver.set(o.delivery.driverId, arr);
-    }
-  });
-  ov.drivers.forEach((d) => {
-    if (!d.location) return;
-    const carrying = ordersByDriver.get(d.id) ?? [];
-    markers.push({
-      x: d.location.x, y: d.location.y, kind: 'driver', title: `${d.name} (driver)`,
-      pulse: d.status === 'on_route',
-      tip: [
-        `${d.vehicleType} · fits ${d.maxPackageSize}`,
-        `Status: ${d.status.replace(/_/g, ' ')}`,
-        `Load: ${d.currentOrderCount}/${d.capacity}`,
-        `At (${d.location.x}, ${d.location.y})`,
-        ...(carrying.length ? [`Order: ${carrying.map((o) => `${o.code} for ${o.customerName}`).join(', ')}`] : []),
-      ],
-    });
-  });
-  ov.orders.forEach((o, i) => {
-    const dlv = ov.deliveries.find((d) => d && d.orderId === o.id) as { route?: Parameters<typeof routeToPath>[0] } | undefined;
-    markers.push({
-      x: o.pickup.x, y: o.pickup.y, kind: 'pickup', title: `Pickup — ${o.storeName ?? 'Merchant'}`,
-      tip: [`${o.code} · ${o.priority}`, `Items: ${itemText(o)}`, `at (${o.pickup.x}, ${o.pickup.y})`],
-    });
-    markers.push({
-      x: o.dropoff.x, y: o.dropoff.y, kind: 'dropoff', title: `${o.customerName} (customer)`,
-      tip: [`${o.code} · ${o.status.replace(/_/g, ' ')}`, `Items: ${itemText(o)}`, `Deadline ${fmtTime(o.deadlineTs)}`, `at (${o.dropoff.x}, ${o.dropoff.y})`],
-    });
-    const pts = routeToPath(dlv?.route);
-    if (pts.length > 1) paths.push({ points: pts, color: ROUTE_COLORS[i % ROUTE_COLORS.length], active: true });
-  });
-
   return `
     <div class="page-head">
       <div><h1>Dispatch Control</h1><p>Live multi-agent coordination ${ov.llmEnabled ? '· LLM advisory ON' : '· deterministic orchestration'}</p></div>
       <div class="pill-row">
         <button class="btn primary" data-act="tick">▶ Simulate tick</button>
         <button class="btn" data-act="monitor">Run monitoring</button>
-        <button class="btn road-sim-btn" data-act="randomize-roads">Simulate road status</button>
         <button class="btn ghost" data-act="reset">Reset demo</button>
       </div>
     </div>
@@ -131,7 +89,7 @@ function overviewPage(ov: Overview): string {
 
     <div class="grid2">
       <div class="card">
-        <div class="card-head"><h2>Network map</h2><span class="muted">${grid.roads.filter((r) => r.status !== 'clear').length} congested segments</span></div>
+        <div class="card-head"><h2>Network map</h2><span class="muted">Real-world locations</span></div>
         <div id="admin-overview-map" class="geo-map overview-map"></div>
       </div>
       <div class="card">
@@ -170,7 +128,7 @@ function orderRow(o: OrderDto, ov: Overview): string {
   const rows = `
     <tr>
       <td><strong>${esc(o.code)}</strong><br><span class="muted">${esc(itemText(o))}</span></td>
-      <td>${esc(o.customerName)}<br><span class="muted">to (${o.dropoff.x}, ${o.dropoff.y})</span></td>
+      <td>${esc(o.customerName)}<br><span class="muted">to ${esc(o.dropoff.address || 'address unavailable')}</span></td>
       <td>${statusChip(o.status)}</td>
       <td>${statusChip(o.priority)}</td>
       <td>${fmtTime(o.deadlineTs)}<br><span class="muted">${minutesUntil(o.deadlineTs)}m</span></td>
@@ -209,8 +167,8 @@ function addToNetworkCard(): string {
           <h3 style="font-size:13px;margin:0">Merchant</h3>
           <label>Business name<input name="businessName" required></label>
           <label>Store name<input name="storeName" required></label>
-          <label>Store X<input name="storeLat" type="number" min="0" max="20" step="1" value="10" required></label>
-          <label>Store Y<input name="storeLng" type="number" min="0" max="20" step="1" value="10" required></label>
+          <label>Store address<input name="storeAddress" data-address-search required placeholder="Search with Nominatim"></label>
+          <input name="storeGeoLat" type="hidden"><input name="storeGeoLng" type="hidden">
           <label>Contact name<input name="contactName" required></label>
           <label>Login email<input name="email" type="email" required></label>
           <button class="btn primary full" type="submit">Add merchant</button>
@@ -221,8 +179,9 @@ function addToNetworkCard(): string {
           <label>Vehicle<select name="vehicleType"><option>car</option><option>bike</option><option>van</option><option>truck</option></select></label>
           <label>Capacity<input name="capacity" type="number" min="1" max="20" value="4" required></label>
           <label>Fits<select name="maxPackageSize"><option>large</option><option>medium</option><option>small</option></select></label>
-          <label>Start X<input name="lat" type="number" min="0" max="20" step="1" value="10" required></label>
-          <label>Start Y<input name="lng" type="number" min="0" max="20" step="1" value="10" required></label>
+          <label>Starting address<input name="address" data-address-search required placeholder="Search with Nominatim"></label>
+          <input name="geoLat" type="hidden"><input name="geoLng" type="hidden">
+          <input name="lat" type="hidden" value="10"><input name="lng" type="hidden" value="10">
           <label>Login email<input name="email" type="email" required></label>
           <button class="btn primary full" type="submit">Add driver</button>
         </form>
@@ -242,7 +201,7 @@ function driverRow(d: DriverDto): string {
     <td>${esc(d.vehicleType)} · ${d.maxPackageSize}</td>
     <td>${statusChip(d.status)}</td>
     <td>${d.currentOrderCount}/${d.capacity}</td>
-    <td>${d.location ? `(${d.location.x}, ${d.location.y})` : '—'}</td>
+    <td>${esc(d.geoLocation?.address || (d.location ? 'Current location' : '—'))}</td>
     <td>${d.status !== 'offline' ? `<button class="btn sm" data-offline="${esc(d.id)}">Take offline</button>` : ''}</td>
   </tr>`;
 }
@@ -251,16 +210,31 @@ function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   enableMapTooltips(el);
   const overviewMap = el.querySelector<HTMLElement>('#admin-overview-map');
   if (overviewMap) {
-    const toGeo = (x: number, y: number) => ({ lat: 1.22 + (y / 20) * .17, lon: 103.74 + (x / 20) * .28 });
     const points: Array<{ lat: number; lon: number; name: string; kind: string; detail?: string }> = [];
-    ov.drivers.forEach((d) => { if (d.location) points.push({ ...(d.geoLocation || toGeo(d.location.x, d.location.y)), name: d.name, kind: 'Driver', detail: `${d.status} · ${d.currentOrderCount}/${d.capacity}` }); });
+    ov.drivers.forEach((d) => { if (d.geoLocation) points.push({ ...d.geoLocation, name: d.name, kind: 'Driver', detail: `${d.status} · ${d.currentOrderCount}/${d.capacity}` }); });
+    const paths: [number, number][][] = [];
     ov.orders.forEach((o) => {
-      points.push({ ...(o.pickup.lat != null && o.pickup.lon != null ? { lat: o.pickup.lat, lon: o.pickup.lon } : toGeo(o.pickup.x, o.pickup.y)), name: o.storeName || 'Merchant pickup', kind: 'Pickup', detail: o.pickup.address || o.code });
-      points.push({ ...(o.dropoff.lat != null && o.dropoff.lon != null ? { lat: o.dropoff.lat, lon: o.dropoff.lon } : toGeo(o.dropoff.x, o.dropoff.y)), name: o.customerName, kind: 'Drop-off', detail: o.dropoff.address || `${o.code} · ${o.status}` });
+      if (o.pickup.lat != null && o.pickup.lon != null) points.push({ lat: o.pickup.lat, lon: o.pickup.lon, name: o.storeName || 'Merchant pickup', kind: 'Pickup', detail: o.pickup.address || o.code });
+      if (o.dropoff.lat != null && o.dropoff.lon != null) points.push({ lat: o.dropoff.lat, lon: o.dropoff.lon, name: o.customerName, kind: 'Drop-off', detail: o.dropoff.address || `${o.code} · ${o.status}` });
+      const route = o.delivery?.route;
+      const path = route ? [...(route.path.toPickup ?? []), ...(route.path.toDropoff ?? [])].map((p) => [p.y, p.x] as [number, number]) : [];
+      if (path.length > 1) paths.push(path);
     });
-    mountOverviewMap(overviewMap, points);
+    mountOverviewMap(overviewMap, points, paths);
   }
   const repaint = () => renderAdmin(el, null, currentPage);
+  el.querySelectorAll<HTMLInputElement>('[data-address-search]').forEach((input) => {
+    input.addEventListener('change', async () => {
+      const result = (await searchNominatim(input.value).catch(() => []))[0];
+      if (!result) return;
+      input.value = result.name;
+      const form = input.form;
+      if (!form) return;
+      const prefix = input.name === 'storeAddress' ? 'store' : '';
+      (form.elements.namedItem(`${prefix}GeoLat`) as HTMLInputElement).value = String(result.lat);
+      (form.elements.namedItem(`${prefix}GeoLng`) as HTMLInputElement).value = String(result.lon);
+    });
+  });
   el.querySelectorAll<HTMLButtonElement>('[data-toggle]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.toggle!;
     expanded.has(id) ? expanded.delete(id) : expanded.add(id);
@@ -284,20 +258,18 @@ function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   };
   addForm('add-merchant', '/admin/merchants', 'Merchant', (fd) => ({
     businessName: fd.get('businessName'), storeName: fd.get('storeName'),
-    storeLat: Number(fd.get('storeLat')), storeLng: Number(fd.get('storeLng')),
+    storeAddress: fd.get('storeAddress'), storeGeoLat: Number(fd.get('storeGeoLat')), storeGeoLng: Number(fd.get('storeGeoLng')),
+    storeLat: 10, storeLng: 10,
     contactName: fd.get('contactName'), email: fd.get('email'),
   }));
   addForm('add-driver', '/admin/drivers', 'Driver', (fd) => ({
     name: fd.get('name'), vehicleType: fd.get('vehicleType'), capacity: Number(fd.get('capacity')),
-    maxPackageSize: fd.get('maxPackageSize'), lat: Number(fd.get('lat')), lng: Number(fd.get('lng')), email: fd.get('email'),
+    maxPackageSize: fd.get('maxPackageSize'), lat: Number(fd.get('lat')), lng: Number(fd.get('lng')), address: fd.get('address'),
+    geoLat: Number(fd.get('geoLat')), geoLng: Number(fd.get('geoLng')), email: fd.get('email'),
   }));
   addForm('add-customer', '/admin/customers', 'Customer', (fd) => ({ name: fd.get('name'), email: fd.get('email') }));
   el.querySelector('[data-act="tick"]')?.addEventListener('click', () => act(() => post('/sim/tick'), 'Advanced simulation one tick'));
   el.querySelector('[data-act="monitor"]')?.addEventListener('click', () => act(() => post('/admin/monitor/tick'), 'Monitoring cycle complete'));
-  el.querySelector('[data-act="randomize-roads"]')?.addEventListener('click', async () => {
-    await act(() => post('/admin/roads/randomize'), 'Every road segment received a randomized status');
-    repaint();
-  });
   el.querySelector('[data-act="reset"]')?.addEventListener('click', () => {
     if (confirm('Reset all demo data?')) act(() => post('/sim/reset'), 'Demo reset');
   });

@@ -49,22 +49,18 @@ export interface ScoreBreakdown {
 const sizeRank: Record<PackageSize, number> = { small: 1, medium: 2, large: 3 };
 const vehicleMaxSize: Record<VehicleType, PackageSize> = { bike: 'small', car: 'medium', van: 'large', truck: 'large' };
 
-// Deterministic assignment scoring model (sums to 100). Follows the product
-// spec's weighting: ETA dominates, then route efficiency, deadline feasibility,
-// driver workload, vehicle fit and raw distance. Vehicle-incompatible / full /
-// unavailable drivers are hard-disqualified before scoring (a stronger check
-// than a partial penalty), so the `vehicle` weight here rewards *spare* vehicle
-// capacity, and `workload`/`distance` are graded.
+// Temporary driver assignment policy: after eligibility checks, select the
+// shortest geo-routed trip. ETA and traffic are retained as informational
+// fields, but do not influence the driver choice for now.
 const WEIGHTS = {
-  eta: 40,
-  efficiency: 20,
-  deadline: 15,
-  workload: 10,
-  vehicle: 8,
-  distance: 7,
+  eta: 0,
+  efficiency: 0,
+  deadline: 0,
+  workload: 0,
+  vehicle: 0,
+  distance: 100,
 } as const;
-const GRID_SPAN = 40; // ~max free-flow minutes across the 20x20 grid at base cost
-const BASE_MIN = 2;
+const DISTANCE_SPAN_KM = 40;
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
@@ -112,7 +108,7 @@ export function scoreDriver(
     ? Math.round(clamp((straightBaseline / totalDeliveryMin) * 100, 0, 100))
     : 0;
   const physicalDistanceUnits = estimate.reachable
-    ? Number((estimate.toPickup.baselineMinutes / BASE_MIN).toFixed(1))
+    ? Number(estimate.toPickup.distanceKm.toFixed(2))
     : Infinity;
   const workloadRatio = Number((driver.currentOrderCount / Math.max(driver.capacity, 1)).toFixed(2));
 
@@ -155,12 +151,7 @@ export function scoreDriver(
   const vehicleSlack = sizeRank[vehicleMaxSize[driver.vehicleType]] - sizeRank[order.packageSize];
   const vehicleScore = clamp(0.6 + vehicleSlack * 0.2, 0, 1);
   // distance: driver already at pickup -> full; across the grid -> 0
-  const distanceScore = clamp(1 - physicalDistanceUnits / GRID_SPAN, 0, 1);
-
-  // Heavy soft penalty for a projected late arrival (in points, not a factor):
-  // ~0.8 pt per minute late, capped, on top of the near-zero deadline factor.
-  const lateByMin = deadlineSatisfied ? 0 : -deadlineSlackMin;
-  const latePenalty = Number(clamp(lateByMin * 0.8, 0, 45).toFixed(2));
+  const distanceScore = clamp(1 - physicalDistanceUnits / DISTANCE_SPAN_KM, 0, 1);
 
   const contributions = {
     eta: Number((etaScore * WEIGHTS.eta).toFixed(2)),
@@ -169,7 +160,6 @@ export function scoreDriver(
     workload: Number((workloadScore * WEIGHTS.workload).toFixed(2)),
     vehicle: Number((vehicleScore * WEIGHTS.vehicle).toFixed(2)),
     distance: Number((distanceScore * WEIGHTS.distance).toFixed(2)),
-    ...(latePenalty ? { latePenalty: -latePenalty } : {}),
   };
   const score = Math.max(0, Number(Object.values(contributions).reduce((a, b) => a + b, 0).toFixed(2)));
 
@@ -183,7 +173,7 @@ export function scoreDriver(
     `Route efficiency: ${routeEfficiencyPct}%`,
     `Driver workload: ${driver.currentOrderCount}/${driver.capacity} active`,
     `Vehicle: ${driver.vehicleType} (fits ${order.packageSize}, ${vehicleSlack} size${vehicleSlack === 1 ? '' : 's'} of spare)`,
-    `Distance to pickup: ${physicalDistanceUnits} units`,
+    `Distance to pickup: ${physicalDistanceUnits} km`,
     `Availability: ${driver.status}`,
   ];
 

@@ -1,25 +1,25 @@
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../main';
 import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
-import { renderMap, enableMapTooltips, type MapMarker } from '../map';
+import { enableMapTooltips } from '../map';
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
-import type { RoadSeg, Point, ProductDto } from '../types';
+import type { Point, ProductDto } from '../types';
 import { mountLocationMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
 
 interface Tracking {
-  order: { id: string; status: string; priority: string; deadlineTs: string; dropoff: Point; items: { name: string; qty: number }[] };
+  order: { id: string; status: string; priority: string; deadlineTs: string; pickup?: Point & { address?: string; lat?: number; lon?: number }; dropoff: Point & { address?: string; lat?: number; lon?: number }; items: { name: string; qty: number }[] };
   delivery: {
     status: string; etaTs: string | null; estimatedDeliveryMinutes: number | null;
     deliveredAt: string | null; driver: { firstName: string; vehicleType: string } | null;
-    driverPosition: Point | null;
+    driverPosition: Point | null; driverPositionGeo: { lat: number; lon: number } | null;
+    route?: { path: { toPickup?: Point[]; toDropoff?: Point[] } } | null;
   } | null;
   events: { agent: string; message: string; ts: string }[];
   run?: PublicRun | null;
 }
-interface Merchant { id: string; name: string; stores: { id: string; name: string; pickup?: Point }[] }
+interface Merchant { id: string; name: string; stores: { id: string; name: string; pickup?: Point & { address?: string | null; lat?: number | null; lon?: number | null } }[] }
 
 let selected: string | null = null;
-let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
 let merchants: Merchant[] = [];
 
 // order wizard
@@ -39,7 +39,6 @@ let currentPage = 'order';
 export async function renderCustomer(el: HTMLElement, _user: unknown, page = 'order'): Promise<void> {
   resetSig('customer');
   currentPage = page;
-  if (!grid.roads.length) { try { grid = await get('/meta/grid'); } catch { /* ignore */ } }
   if (!merchants.length) { try { merchants = (await get<{ merchants: Merchant[] }>('/directory/merchants')).merchants; } catch { /* ignore */ } }
   const draw = async () => {
     try {
@@ -114,20 +113,7 @@ function trackingCard(t: Tracking): string {
 }
 
 function mapFor(t: Tracking): string {
-  const code = `#${t.order.id.replace(/^ord_/, '').slice(-6).toUpperCase()}`;
-  const itemStr = t.order.items.map((i) => `${i.name}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ') || '—';
-  const markers: MapMarker[] = [{
-    x: t.order.dropoff.x, y: t.order.dropoff.y, kind: 'dropoff', title: `Your delivery ${code}`,
-    tip: [itemStr, `Status: ${(t.delivery?.status ?? t.order.status).replace(/_/g, ' ')}`, `Deadline ${fmtTime(t.order.deadlineTs)}`],
-  }];
-  if (t.delivery?.driverPosition) {
-    markers.push({
-      x: t.delivery.driverPosition.x, y: t.delivery.driverPosition.y, kind: 'driver', pulse: true,
-      title: t.delivery.driver ? `${t.delivery.driver.firstName} (your driver)` : 'Your driver',
-      tip: [t.delivery.driver ? t.delivery.driver.vehicleType : 'en route', t.delivery.etaTs ? `ETA ${fmtTime(t.delivery.etaTs)}` : ''],
-    });
-  }
-  return renderMap({ size: grid.size, roads: grid.roads, markers, paths: [] });
+  return '<div id="customer-live-map" class="geo-map"></div>';
 }
 
 /* ------------------------------------------------------------------ wizard */
@@ -160,7 +146,7 @@ function stepMerchant(): string {
     <button type="button" class="shop-card merch-card${s.id === pickedStoreId ? ' selected' : ''}" data-pick-store="${esc(s.id)}" data-merchant="${esc(m.id)}">
       <h3>${esc(m.name)}</h3>
       <span class="desc">${esc(s.name)}</span>
-      ${s.pickup ? `<span class="muted" style="font-size:11px">picks up at (${s.pickup.x}, ${s.pickup.y})</span>` : ''}
+      ${s.pickup ? `<span class="muted" style="font-size:11px">picks up at ${esc(s.pickup.address || 'merchant address')}</span>` : ''}
     </button>`)).join('')}</div>
     <div class="pill-row" style="margin-top:14px">
       <button class="btn primary" data-wiz-next${pickedStoreId ? '' : ' disabled'}>Next: choose products</button>
@@ -187,8 +173,8 @@ function stepDelivery(): string {
       <div id="delivery-results" class="geo-results full"></div>
       <div id="delivery-map" class="geo-map full"></div>
       <p class="muted full geo-help">Click the map to drop your delivery pin. ${deliveryGeo ? `Selected: <strong>${esc(deliveryGeo.name)}</strong>` : 'No pin selected yet.'}</p>
-      <label>Grid X (legacy)<input name="deliveryLat" type="number" min="0" max="20" step="1" value="${draft.deliveryLat}" required></label>
-      <label>Grid Y (legacy)<input name="deliveryLng" type="number" min="0" max="20" step="1" value="${draft.deliveryLng}" required></label>
+      <input name="deliveryLat" type="hidden" value="${draft.deliveryLat}">
+      <input name="deliveryLng" type="hidden" value="${draft.deliveryLng}">
       <label>Priority<select name="priority"><option value="standard"${draft.priority === 'standard' ? ' selected' : ''}>standard</option><option value="express"${draft.priority === 'express' ? ' selected' : ''}>express</option></select></label>
       <label>Deadline<input name="deadlineTs" type="datetime-local" value="${esc(soon)}" required></label>
       <label class="full">Note <span class="muted">(optional)</span><input name="note" value="${esc(draft.note)}" placeholder="e.g. leave at the front desk"></label>
@@ -208,7 +194,7 @@ function stepReview(): string {
   return `
     <dl class="kv">
       <dt>Store</dt><dd>${esc(pickedStoreName())}</dd>
-      <dt>Deliver to</dt><dd>(${draft.deliveryLat}, ${draft.deliveryLng})</dd>
+      <dt>Deliver to</dt><dd>${esc(deliveryGeo?.name || deliveryAddress || 'address unavailable')}</dd>
       <dt>Priority</dt><dd>${esc(draft.priority)}</dd>
       <dt>Deadline</dt><dd>${fmtTime(new Date(draft.deadlineTs).toISOString())}</dd>
       ${draft.note ? `<dt>Note</dt><dd>${esc(draft.note)}</dd>` : ''}
@@ -234,6 +220,14 @@ function saveDeliveryForm(el: HTMLElement): void {
 
 function wire(el: HTMLElement): void {
   enableMapTooltips(el);
+  const liveMap = el.querySelector<HTMLElement>('#customer-live-map');
+  if (liveMap && lastTracking?.order.dropoff.lat != null && lastTracking.order.dropoff.lon != null) {
+    const points = [{ lat: lastTracking.order.dropoff.lat, lon: lastTracking.order.dropoff.lon, kind: 'Drop-off', name: lastTracking.order.dropoff.address || 'Delivery address' }];
+    if (lastTracking.order.pickup?.lat != null && lastTracking.order.pickup.lon != null) points.push({ lat: lastTracking.order.pickup.lat, lon: lastTracking.order.pickup.lon, kind: 'Pickup', name: 'Merchant pickup' });
+    if (lastTracking.delivery?.driverPositionGeo) points.push({ lat: lastTracking.delivery.driverPositionGeo.lat, lon: lastTracking.delivery.driverPositionGeo.lon, kind: 'Driver', name: 'Your driver' });
+    const path = [...(lastTracking.delivery?.route?.path.toPickup ?? []), ...(lastTracking.delivery?.route?.path.toDropoff ?? [])];
+    import('../geoMap').then(({ mountRouteMap }) => mountRouteMap(liveMap, points, path.length > 1 ? [path.map((p) => [p.y, p.x] as [number, number])] : []));
+  }
   el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; repaint(el); }));
 
   el.querySelectorAll<HTMLButtonElement>('[data-pick-store]').forEach((b) => b.addEventListener('click', () => {
@@ -247,7 +241,7 @@ function wire(el: HTMLElement): void {
   const geoMap = el.querySelector<HTMLElement>('#delivery-map');
   if (geoMap) {
     const store = merchants.flatMap((m) => m.stores).find((s) => s.id === pickedStoreId)?.pickup;
-    const pickup = store ? gridToGeo(store.x, store.y) : null;
+    const pickup = store?.lat != null && store.lon != null ? { lat: store.lat, lon: store.lon, name: store.address || 'Merchant pickup' } : null;
     mountLocationMap(geoMap, deliveryGeo, async (point) => {
       deliveryGeo = point;
       deliveryRoute = pickup ? await routeWithOsrm(pickup, point).catch(() => null) : null;

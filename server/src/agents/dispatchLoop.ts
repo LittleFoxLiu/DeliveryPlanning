@@ -9,8 +9,9 @@
  * Every step is a typed message on a persisted `PlanningRun`. The LLM is invited
  * to explain the final decision (non-blocking); it never picks the driver.
  */
-import { orders, roads, drivers, type OrderRow } from '../repo.js';
-import { estimateDeliveryTime, type DeliveryEstimate, type Point } from '../engine/routing.js';
+import { orders, drivers, stores, type OrderRow } from '../repo.js';
+import { type DeliveryEstimate } from '../engine/routing.js';
+import { estimateGeoDelivery } from '../engine/geoRouting.js';
 import { type ScoreBreakdown } from '../engine/scoring.js';
 import { emitAgentEvent } from '../events.js';
 import { explainAssignment } from './llm.js';
@@ -74,10 +75,14 @@ function proposalFromBreakdown(b: ScoreBreakdown, driverName: string): AgentProp
 
 /** Recompute the authoritative full estimate for one driver (used at execution). */
 async function fullEstimate(order: OrderRow, driverId: string): Promise<DeliveryEstimate | null> {
-  const [d, segs] = await Promise.all([drivers.byId(driverId), roads.segments()]);
-  if (!d || d.lat == null) return null;
-  const pos: Point = { x: d.lat, y: d.lng as number };
-  return estimateDeliveryTime(pos, { x: order.pickup_lat, y: order.pickup_lng }, { x: order.delivery_lat, y: order.delivery_lng }, segs);
+  const [d, store] = await Promise.all([drivers.byId(driverId), stores.byId(order.store_id)]);
+  if (!d || d.geo_lat == null || d.geo_lng == null || !store || store.geo_lat == null || store.geo_lng == null
+    || order.delivery_geo_lat == null || order.delivery_geo_lng == null) return null;
+  return estimateGeoDelivery(
+    { lat: d.geo_lat, lon: d.geo_lng },
+    { lat: store.geo_lat, lon: store.geo_lng },
+    { lat: order.delivery_geo_lat, lon: order.delivery_geo_lng },
+  );
 }
 
 export async function runDispatchLoop(input: {
@@ -193,11 +198,10 @@ export async function runDispatchLoop(input: {
   }
 
   // ---------- 3. Routing Agent: evidence per candidate ----------
-  await invokeTool(run, 'RoutingAgent', tTrafficState.name, {});
   for (const c of eligible) {
     await invokeTool(run, 'RoutingAgent', tEstimateDelivery.name, { driverId: c.driverId, orderId: order0.id });
   }
-  await ev(run, 'RoutingAgent', 'routes_calculated', `Computed ${eligible.length} candidate route${eligible.length === 1 ? '' : 's'} with live traffic`);
+  await ev(run, 'RoutingAgent', 'routes_calculated', `Computed ${eligible.length} candidate route${eligible.length === 1 ? '' : 's'} by travel distance`);
   await checkpoint(run);
 
   // ---------- 4. Dispatch Agent: score + PROPOSE ----------
@@ -225,8 +229,10 @@ export async function runDispatchLoop(input: {
 
   // ---------- 5. Monitoring / Routing: CRITIQUE ----------
   const w = winner.breakdown.factors;
-  const winnerLate = !w.deadlineSatisfied;
-  const winnerThin = w.deadlineSlackMin < CRITIQUE_SLACK_MIN;
+  // Traffic and deadline risk are intentionally informational while the
+  // distance-first driver routing experiment is active.
+  const winnerLate = false;
+  const winnerThin = false;
   if (winnerLate || winnerThin) {
     const alt = eligScored.find((s) => s.driverId !== winner.driverId && s.breakdown.factors.deadlineSatisfied
       && s.breakdown.factors.deadlineSlackMin >= CRITIQUE_SLACK_MIN);

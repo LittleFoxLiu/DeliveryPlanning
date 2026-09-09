@@ -60,6 +60,9 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
   } else if (role === 'customer') {
     refId = (await customers.create(name)).id;
   } else {
+    const geoLat = optionalNumber(b.geoLat);
+    const geoLng = optionalNumber(b.geoLng);
+    if (geoLat === null || geoLng === null) throw badRequest('A Nominatim starting address is required');
     const created = await drivers.create({
       name,
       vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
@@ -69,7 +72,7 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
       lng: coord(b, 'lng'),
       status: 'available',
       address: str(b, 'address', { optional: true, max: 300 }) || null,
-      geoLat: optionalNumber(b.geoLat), geoLng: optionalNumber(b.geoLng),
+      geoLat, geoLng,
     });
     refId = created.id;
   }
@@ -152,12 +155,15 @@ api.post('/onboarding/role', authenticate(true), authLimiter, h(async (req, res)
     await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: location.lat, pickupLng: location.lng, address: location.address, geoLat: location.geoLat, geoLng: location.geoLng });
     refId = merchant.id;
   } else if (role === 'driver') {
+    const geoLat = optionalNumber(b.geoLat);
+    const geoLng = optionalNumber(b.geoLng);
+    if (geoLat === null || geoLng === null) throw badRequest('A Nominatim starting address is required');
     const driver = await drivers.create({
       name: current.name, vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
       capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }), maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
       lat: coord(b, 'lat'), lng: coord(b, 'lng'), status: 'available',
       address: str(b, 'address', { optional: true, max: 300 }) || null,
-      geoLat: optionalNumber(b.geoLat), geoLng: optionalNumber(b.geoLng),
+      geoLat, geoLng,
     });
     refId = driver.id;
   } else if (role === 'customer') {
@@ -206,7 +212,7 @@ async function ownedDeliveryForDriver(req: Request, deliveryId: string) {
 
 async function orderWithDelivery(o: Parameters<typeof orderView>[0]) {
   const d = await deliveries.byOrderId(o.id);
-  return { ...(await orderView(o)), delivery: d ? deliveryView(d) : null };
+  return { ...(await orderView(o)), delivery: d ? { ...deliveryView(d), route: await activeRouteView(d.id) } : null };
 }
 
 /* ---------------------------------------------------------------- merchant */
@@ -342,7 +348,7 @@ api.get('/merchant/orders/:id', ...merchantOnly, h(async (req, res) => {
     order: await orderView(order),
     delivery: delivery ? deliveryView(delivery) : null,
     assignedDriver: driver
-      ? { name: driver.name, vehicleType: driver.vehicle_type, status: driver.status, location: driver.lat != null ? { x: driver.lat, y: driver.lng } : null }
+      ? { name: driver.name, vehicleType: driver.vehicle_type, status: driver.status, location: driver.lat != null ? { x: driver.lat, y: driver.lng } : null, geoLocation: driver.geo_lat != null ? { lat: driver.geo_lat, lon: driver.geo_lng, address: driver.location_address } : null }
       : null,
     route: delivery ? await activeRouteView(delivery.id) : null,
     events: await listEvents({ orderId: order.id, limit: 60 }),
@@ -470,10 +476,13 @@ api.post('/driver/location', ...driverOnly, h(async (req, res) => {
   const driver = await drivers.byId(req.user!.refId!);
   if (!driver) throw notFound('Driver profile not found');
   if (driver.status === 'available') throw conflict('Set your status to break or offline before changing your position');
-  const lat = coord(b, 'lat');
-  const lng = coord(b, 'lng');
-  if (!Number.isInteger(lat) || !Number.isInteger(lng)) throw badRequest('Position must be on a grid intersection');
-  await drivers.recordLocation(req.user!.refId!, lat, lng);
+  const geoLat = optionalNumber(b.geoLat);
+  const geoLng = optionalNumber(b.geoLng);
+  if (geoLat === null || geoLng === null) throw badRequest('A Nominatim latitude and longitude are required');
+  if (geoLat < -90 || geoLat > 90 || geoLng < -180 || geoLng > 180) throw badRequest('Invalid geographic coordinates');
+  const lat = b.lat === undefined ? gridFromGeo(geoLat, 1.22, 1.39) : coord(b, 'lat');
+  const lng = b.lng === undefined ? gridFromGeo(geoLng, 103.74, 104.02) : coord(b, 'lng');
+  await drivers.recordLocation(req.user!.refId!, lat, lng, str(b, 'address', { optional: true, max: 300 }) || null, geoLat, geoLng);
   res.json({ ok: true });
 }));
 
@@ -531,6 +540,9 @@ api.post('/admin/merchants', ...adminOnly, h(async (req, res) => {
 api.post('/admin/drivers', ...adminOnly, h(async (req, res) => {
   const b = asObject(req.body);
   const name = str(b, 'name', { min: 1, max: 120 });
+  const geoLat = optionalNumber(b.geoLat);
+  const geoLng = optionalNumber(b.geoLng);
+  if (geoLat === null || geoLng === null) throw badRequest('A Nominatim starting address is required');
   const created = await drivers.create({
     name,
     vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
@@ -538,7 +550,7 @@ api.post('/admin/drivers', ...adminOnly, h(async (req, res) => {
     maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
     lat: coord(b, 'lat'),
     lng: coord(b, 'lng'),
-    status: 'available',
+    status: 'available', address: str(b, 'address', { max: 300 }), geoLat, geoLng,
   });
   const credentials = await provisionUser(str(b, 'email', { max: 200 }), 'driver', name, created.id);
   res.status(201).json({ driver: { id: created.id, name }, credentials });
@@ -729,12 +741,14 @@ type LocationPoint = { lat: number; lng: number; address: string | null; geoLat:
 function locationPoint(b: Record<string, unknown>, latKey: string, lngKey: string, addressKey: string, geoLatKey: string, geoLngKey: string): LocationPoint {
   const geoLat = optionalNumber(b[geoLatKey]);
   const geoLng = optionalNumber(b[geoLngKey]);
+  if (geoLat === null || geoLng === null) throw badRequest(`A real address with Nominatim coordinates is required for ${addressKey}`);
   if ((geoLat === null) !== (geoLng === null) || (geoLat !== null && (geoLat < -90 || geoLat > 90 || geoLng! < -180 || geoLng! > 180))) {
     throw badRequest('Both valid geocoded latitude and longitude are required');
   }
+  const address = str(b, addressKey, { max: 300 });
   const lat = b[latKey] === undefined && geoLat !== null ? gridFromGeo(geoLat, 1.22, 1.39) : coord(b, latKey);
   const lng = b[lngKey] === undefined && geoLng !== null ? gridFromGeo(geoLng, 103.74, 104.02) : coord(b, lngKey);
-  return { lat, lng, address: str(b, addressKey, { optional: true, max: 300 }) || null, geoLat, geoLng };
+  return { lat, lng, address, geoLat, geoLng };
 }
 
 function gridFromGeo(value: number, min: number, max: number): number {

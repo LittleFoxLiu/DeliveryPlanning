@@ -1,9 +1,9 @@
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, fmtTime, minutesUntil } from '../ui';
-import { renderMap, routeToPath, enableMapTooltips, type MapMarker, type MapPath } from '../map';
-import type { RoadSeg, Point } from '../types';
-import { mountLocationMap, type GeoPoint } from '../geoMap';
+import { enableMapTooltips } from '../map';
+import type { Point } from '../types';
+import { mountLocationMap, mountRouteMap, type GeoPoint } from '../geoMap';
 
 interface DriverDelivery {
   id: string; status: string; etaTs: string | null; estimatedDeliveryMinutes: number | null;
@@ -13,20 +13,18 @@ interface DriverDelivery {
 }
 interface Me { location: Point | null; geoLocation?: { lat: number; lon: number } | null; address?: string | null; status: string; name: string; vehicleType: string }
 
-let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
 let selectingPosition = false;
 let currentPage = 'deliveries';
 
 export async function renderDriver(el: HTMLElement, _user: unknown, page = 'deliveries'): Promise<void> {
   resetSig('driver');
   currentPage = page;
-  if (!grid.roads.length) { try { grid = await get('/meta/grid'); } catch { /* ignore */ } }
   const draw = async () => {
     try {
       const { deliveries, me } = await get<{ deliveries: DriverDelivery[]; me: Me }>('/driver/deliveries');
       const active = deliveries.filter((d) => !['delivered', 'cancelled', 'failed'].includes(d.status));
       if (!changed('driver', { deliveries, me, page, selectingPosition })) return;
-      if (patchView(el, view(active, deliveries, me))) wire(el); else resetSig('driver');
+      if (patchView(el, view(active, deliveries, me))) wire(el, active, me); else resetSig('driver');
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) handleUnauthed();
     }
@@ -44,33 +42,25 @@ function nextTarget(d: DriverDelivery): { label: string; at: Point } {
 
 function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
   const done = all.filter((d) => d.status === 'delivered').length;
-  const markers: MapMarker[] = [];
-  const paths: MapPath[] = [];
+  const geoPoints: Array<GeoPoint & { kind: string; name: string; detail?: string }> = [];
 
-  if (me.location) {
-    markers.push({
-      x: me.location.x, y: me.location.y, kind: 'driver', pulse: me.status === 'on_route',
-      title: `You (${me.name})`,
-      tip: [`${me.vehicleType} · ${me.status.replace(/_/g, ' ')}`, `at (${me.location.x}, ${me.location.y})`],
-    });
+  if (me.geoLocation) {
+    geoPoints.push({ ...me.geoLocation, kind: 'Driver', name: `You (${me.name})`, detail: me.status.replace(/_/g, ' ') });
   }
   active.forEach((d) => {
-    const t = nextTarget(d);
-    markers.push({ x: d.pickup.x, y: d.pickup.y, kind: 'pickup', title: `Pickup — ${d.pickup.name || 'Merchant'}`, tip: [d.order.code, `(${d.pickup.x}, ${d.pickup.y})`] });
-    markers.push({ x: d.dropoff.x, y: d.dropoff.y, kind: 'dropoff', title: `${d.order.customerName} (customer)`, tip: [d.order.code, `(${d.dropoff.x}, ${d.dropoff.y})`], pulse: t.at === d.dropoff });
-    const pts = routeToPath(d.route);
-    if (pts.length > 1) paths.push({ points: pts, color: '#159c99', active: true });
+    if (d.pickup.lat != null && d.pickup.lon != null) geoPoints.push({ lat: d.pickup.lat, lon: d.pickup.lon, kind: 'Pickup', name: d.pickup.name || 'Merchant', detail: d.order.code });
+    if (d.dropoff.lat != null && d.dropoff.lon != null) geoPoints.push({ lat: d.dropoff.lat, lon: d.dropoff.lon, kind: 'Drop-off', name: d.order.customerName, detail: d.order.code });
   });
 
-  const here = me.location ? `(${me.location.x}, ${me.location.y})` : 'unknown';
+  const here = me.address || 'Current location unavailable';
   const mapCard = (selectable: boolean) => `<div class="card">
     <div class="card-head"><h2>${selectable ? 'Your position' : 'Your route'}</h2><span class="muted">you are the teal dot</span></div>
-    ${selectable ? `<div id="driver-position-map" class="geo-map" data-driver-location="${me.location ? `${me.location.x},${me.location.y}` : ''}"></div><p class="muted geo-help">Click anywhere on the map to set your current position.</p>` : renderMap({ size: grid.size, roads: grid.roads, markers, paths })}
+    ${selectable ? `<div id="driver-position-map" class="geo-map" data-driver-location="${me.location ? `${me.location.x},${me.location.y}` : ''}"></div><p class="muted geo-help">Click anywhere on the map to set your current position.</p>` : `<div id="driver-route-map" class="geo-map"></div>${!geoPoints.length ? '<p class="muted">Geo route data is not available for this delivery yet.</p>' : ''}`}
   </div>`;
 
   if (currentPage === 'account') {
     return `
-      <div class="page-head"><div><h1>Account</h1><p>You are at <strong>${esc(me.address || here)}</strong> ${statusChip(me.status)}</p></div></div>
+      <div class="page-head"><div><h1>Account</h1><p>Current position: <strong>${esc(me.address || here)}</strong> ${statusChip(me.status)}</p></div></div>
       <div class="grid2">
         <div class="card">
           <div class="card-head"><h2>Availability</h2></div>
@@ -78,7 +68,7 @@ function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
             <dt>Name</dt><dd>${esc(me.name)}</dd>
             <dt>Vehicle</dt><dd>${esc(me.vehicleType)}</dd>
             <dt>Status</dt><dd>${statusChip(me.status)}</dd>
-            <dt>Position</dt><dd>${esc(me.address || here)}${me.geoLocation ? ` <span class="muted">(${me.geoLocation.lat.toFixed(5)}, ${me.geoLocation.lon.toFixed(5)})</span>` : ''}</dd>
+            <dt>Position</dt><dd>${esc(me.address || here)}</dd>
           </dl>
           <div class="pill-row" style="margin-top:12px">
             <button class="btn ghost" data-status="break">Take a break</button>
@@ -113,11 +103,11 @@ function card(d: DriverDelivery): string {
     ['picked_up', 'en_route_drop'].includes(d.status) ? `<button class="btn primary" data-do="delivered" data-id="${esc(d.id)}">Mark delivered</button>` : '';
   return `<div class="card">
     <div class="card-head"><h2>Order ${esc(d.order.code)}</h2>${statusChip(d.status)}</div>
-    <div class="next-step">➜ ${d.status === 'en_route_pickup' ? 'Collecting at' : ['picked_up', 'en_route_drop'].includes(d.status) ? 'Delivering to' : 'Head to'} <strong>${esc(t.label)}</strong> — (${t.at.x}, ${t.at.y})</div>
+    <div class="next-step">➜ ${d.status === 'en_route_pickup' ? 'Collecting at' : ['picked_up', 'en_route_drop'].includes(d.status) ? 'Delivering to' : 'Head to'} <strong>${esc(t.label)}</strong></div>
     <dl class="kv" style="margin-top:10px">
       <dt>Customer</dt><dd>${esc(d.order.customerName)}</dd>
-      <dt>Pickup</dt><dd>${esc(d.pickup.name || 'Merchant')} — ${esc(d.pickup.address || `(${d.pickup.x}, ${d.pickup.y})`)}</dd>
-      <dt>Drop-off</dt><dd>${esc(d.dropoff.address || `(${d.dropoff.x}, ${d.dropoff.y})`)}</dd>
+      <dt>Pickup</dt><dd>${esc(d.pickup.name || 'Merchant')} — ${esc(d.pickup.address || 'address unavailable')}</dd>
+      <dt>Drop-off</dt><dd>${esc(d.dropoff.address || 'address unavailable')}</dd>
       <dt>Items</dt><dd>${d.order.items.map((i) => `${esc(i.name)}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ') || '—'}</dd>
       <dt>Package</dt><dd>${esc(d.order.packageSize)} · ${esc(d.order.priority)}</dd>
       ${d.order.note ? `<dt>Note</dt><dd>${esc(d.order.note)}</dd>` : ''}
@@ -128,7 +118,7 @@ function card(d: DriverDelivery): string {
   </div>`;
 }
 
-function wire(el: HTMLElement): void {
+function wire(el: HTMLElement, active: DriverDelivery[], me: Me): void {
   enableMapTooltips(el);
   const repaint = () => renderDriver(el, null, currentPage);
   el.querySelector<HTMLButtonElement>('[data-position-start]')?.addEventListener('click', () => {
@@ -143,44 +133,23 @@ function wire(el: HTMLElement): void {
     mountLocationMap(positionMap, initial, async (point) => {
       const x = geoToGrid(point.lon, 103.74, 104.02);
       const y = geoToGrid(point.lat, 1.22, 1.39);
-      try { await post('/driver/location', { lat: x, lng: y }); selectingPosition = false; toast(`Position updated to (${x}, ${y})`); repaint(); }
+      try { await post('/driver/location', { lat: x, lng: y, geoLat: point.lat, geoLng: point.lon, address: point.name }); selectingPosition = false; toast(`Position updated to ${point.name || 'selected location'}`); repaint(); }
       catch (err) { toast(err instanceof ApiError ? err.message : 'Position update failed', 'error'); }
     });
   }
-  const map = el.querySelector<HTMLElement>('[data-map-selectable="1"]');
-  const svg = map?.querySelector<SVGSVGElement>('svg');
-  const pointForEvent = (event: MouseEvent): { x: number; y: number } | null => {
-    if (!svg) return null;
-    const rect = svg.getBoundingClientRect();
-    const viewBox = svg.viewBox.baseVal;
-    if (!rect.width || !rect.height) return null;
-    // Convert from the rendered SVG back into grid coordinates, then snap to
-    // an integer x/y so only grid intersections can be selected.
-    const rawX = ((event.clientX - rect.left) / rect.width * viewBox.width + viewBox.x) / (1000 / grid.size);
-    const rawY = ((event.clientY - rect.top) / rect.height * viewBox.height + viewBox.y) / (1000 / grid.size);
-    return { x: Math.max(0, Math.min(grid.size, Math.round(rawX))), y: Math.max(0, Math.min(grid.size, Math.round(rawY))) };
-  };
-  if (svg) svg.addEventListener('mousemove', (event) => {
-    if (!selectingPosition) return;
-    const point = pointForEvent(event);
-    const preview = svg.querySelector<SVGGElement>('[data-position-preview]');
-    if (!point || !preview) return;
-    preview.setAttribute('transform', `translate(${point.x * (1000 / grid.size)} ${point.y * (1000 / grid.size)})`);
-    preview.removeAttribute('hidden');
-  });
-  if (svg) svg.addEventListener('mouseleave', () => svg.querySelector<SVGGElement>('[data-position-preview]')?.setAttribute('hidden', ''));
-  if (svg) svg.addEventListener('click', async (event) => {
-    if (!selectingPosition) return;
-    const point = pointForEvent(event);
-    if (!point) return;
-    const { x, y } = point;
-    try {
-      await post('/driver/location', { lat: x, lng: y });
-      selectingPosition = false;
-      toast(`Position updated to (${x}, ${y})`);
-      repaint();
-    } catch (err) { toast(err instanceof ApiError ? err.message : 'Position update failed', 'error'); }
-  });
+  const routeMap = el.querySelector<HTMLElement>('#driver-route-map');
+  if (routeMap) {
+    const points: Array<GeoPoint & { kind: string; name: string; detail?: string }> = [];
+    const paths: [number, number][][] = [];
+    if (me.geoLocation) points.push({ ...me.geoLocation, kind: 'Driver', name: `You (${me.name})`, detail: me.status.replace(/_/g, ' ') });
+    active.forEach((d) => {
+      if (d.pickup.lat != null && d.pickup.lon != null) points.push({ lat: d.pickup.lat, lon: d.pickup.lon, kind: 'Pickup', name: d.pickup.name || 'Merchant', detail: d.order.code });
+      if (d.dropoff.lat != null && d.dropoff.lon != null) points.push({ lat: d.dropoff.lat, lon: d.dropoff.lon, kind: 'Drop-off', name: d.order.customerName, detail: d.order.code });
+      const path = [...(d.route?.path.toPickup ?? []), ...(d.route?.path.toDropoff ?? [])];
+      if (path.length > 1) paths.push(path.map((p) => [p.y, p.x]));
+    });
+    mountRouteMap(routeMap, points, paths);
+  }
   el.querySelectorAll<HTMLButtonElement>('[data-accept]').forEach((b) => b.addEventListener('click', () =>
     run(() => post(`/driver/deliveries/${b.dataset.accept}/accept`), 'Accepted — navigate to the pickup', el)));
   el.querySelectorAll<HTMLButtonElement>('[data-do]').forEach((b) => b.addEventListener('click', () =>

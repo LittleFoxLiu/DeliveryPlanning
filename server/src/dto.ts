@@ -116,13 +116,15 @@ export async function assignmentReasoningView(orderId: string) {
 export async function orderTrackingView(o: OrderRow) {
   const delivery = await deliveries.byOrderId(o.id);
   const driver = delivery?.driver_id ? await drivers.byId(delivery.driver_id) : undefined;
-  const [items, events, run] = await Promise.all([
-    orders.items(o.id), listEvents({ orderId: o.id, limit: 40 }), latestRunForOrder(o.id),
+  const [items, events, run, store] = await Promise.all([
+    orders.items(o.id), listEvents({ orderId: o.id, limit: 40 }), latestRunForOrder(o.id), stores.byId(o.store_id),
   ]);
+  const route = delivery ? await activeRouteView(delivery.id) : null;
   return {
     order: {
       id: o.id, status: o.status, priority: o.priority, deadlineTs: o.deadline_ts,
-      dropoff: { x: o.delivery_lat, y: o.delivery_lng }, items,
+      pickup: { x: o.pickup_lat, y: o.pickup_lng, address: store?.address ?? null, lat: store?.geo_lat ?? null, lon: store?.geo_lng ?? null },
+      dropoff: { x: o.delivery_lat, y: o.delivery_lng, address: o.delivery_address, lat: o.delivery_geo_lat, lon: o.delivery_geo_lng }, items,
     },
     delivery: delivery
       ? {
@@ -134,6 +136,9 @@ export async function orderTrackingView(o: OrderRow) {
         driver: driverPublicView(driver),
         driverPosition: driver && driver.lat != null && ['en_route_pickup', 'picked_up', 'en_route_drop'].includes(delivery.status)
           ? { x: driver.lat, y: driver.lng } : null,
+        driverPositionGeo: driver && driver.geo_lat != null && ['en_route_pickup', 'picked_up', 'en_route_drop'].includes(delivery.status)
+          ? { lat: driver.geo_lat, lon: driver.geo_lng } : null,
+        route,
       }
       : null,
     events: events

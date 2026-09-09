@@ -1,4 +1,4 @@
-import { orders, deliveries, routes, drivers, roads, assignments, type OrderRow } from '../repo.js';
+import { orders, deliveries, routes, drivers, assignments, type OrderRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
 import { id, minutesFromNow } from '../util.js';
 import { driverAgent } from './driverAgent.js';
@@ -6,7 +6,7 @@ import { routingAgent } from './routingAgent.js';
 import { dispatchTools, type DispatchDecision } from './dispatchAgent.js';
 import { monitoringAgent, type Finding } from './monitoringAgent.js';
 import { adviseRemediation } from './llm.js';
-import { estimateDeliveryTime, type Point } from '../engine/routing.js';
+import type { Point } from '../engine/routing.js';
 import { runDispatchLoop } from './dispatchLoop.js';
 import {
   createRun, checkpoint, finishRun, setRisk, setDecision, createEscalation,
@@ -257,20 +257,16 @@ export const coordinator = {
     }
 
     const newEtaTs = minutesFromNow(result.etaMinutes);
-    const segs = await roads.segments();
-    const est = finding.phase === 'to_pickup'
-      ? estimateDeliveryTime(pos, { x: order.pickup_lat, y: order.pickup_lng }, { x: order.delivery_lat, y: order.delivery_lng }, segs)
-      : null;
     await routes.create({
       deliveryId: delivery.id,
       driverId: delivery.driver_id!,
       originLat: pos.x,
       originLng: pos.y,
-      legs: est
-        ? { toPickup: { etaMinutes: est.toPickup.etaMinutes, distanceKm: est.toPickup.distanceKm }, handlingMinutes: est.handlingMinutes, toDropoff: { etaMinutes: est.toDropoff.etaMinutes, distanceKm: est.toDropoff.distanceKm } }
+      legs: finding.phase === 'to_pickup'
+        ? { toPickup: { etaMinutes: result.route!.etaMinutes, distanceKm: result.route!.distanceKm } }
         : { toDropoff: { etaMinutes: result.route!.etaMinutes, distanceKm: result.route!.distanceKm } },
-      path: est ? { toPickup: est.toPickup.path, toDropoff: est.toDropoff.path } : { toDropoff: result.route!.path },
-      distanceKm: est ? est.totalDistanceKm : result.route!.distanceKm,
+      path: finding.phase === 'to_pickup' ? { toPickup: result.route!.path } : { toDropoff: result.route!.path },
+      distanceKm: result.route!.distanceKm,
       etaMinutes: result.etaMinutes,
       trafficPenalty: result.route!.trafficPenaltyMinutes,
     });

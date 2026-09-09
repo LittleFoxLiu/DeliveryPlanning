@@ -1,12 +1,27 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
-export interface GeoPoint { lat: number; lon: number; name: string; district?: string }
+// Vite does not automatically resolve Leaflet's runtime icon URLs. Without
+// these explicit URLs the marker position works, but the pin image is blank.
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+});
+
+export interface GeoPoint { lat: number; lon: number; name: string; district?: string; address?: string | null }
 export interface GeoRoute { distanceKm: number; durationMinutes: number; geometry: [number, number][] }
 
 const nominatimUrl = import.meta.env.VITE_NOMINATIM_URL || 'https://nominatim.openstreetmap.org/search';
 const routingUrl = import.meta.env.VITE_ROUTING_URL || 'https://router.project-osrm.org/route/v1/driving';
-const bounds: L.LatLngBoundsExpression = [[1.22, 103.74], [1.39, 104.02]];
+const bounds: L.LatLngBoundsExpression = [[1.22, 103.60], [1.48, 104.05]];
+const icons: Record<string, L.DivIcon> = {
+  Driver: L.divIcon({ className: 'geo-pin-wrap', html: '<span class="geo-pin" aria-hidden="true">🚚</span>', iconSize: [30, 30], iconAnchor: [15, 15] }),
+  Pickup: L.divIcon({ className: 'geo-pin-wrap', html: '<span class="geo-pin" aria-hidden="true">🏪</span>', iconSize: [30, 30], iconAnchor: [15, 15] }),
+  'Drop-off': L.divIcon({ className: 'geo-pin-wrap', html: '<span class="geo-pin" aria-hidden="true">📍</span>', iconSize: [30, 30], iconAnchor: [15, 30] }),
+};
+const iconFor = (kind?: string) => icons[kind || ''] || icons['Drop-off'];
+const html = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c] as string));
 
 export async function searchNominatim(query: string, signal?: AbortSignal): Promise<GeoPoint[]> {
   if (query.trim().length < 3) return [];
@@ -46,7 +61,7 @@ export function mountLocationMap(container: HTMLElement, initial: GeoPoint | nul
   L.tileLayer(import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
   let marker: L.Marker | undefined;
   let line: L.Polyline | undefined;
-  const placeMarker = (point: GeoPoint) => { marker?.remove(); marker = L.marker([point.lat, point.lon]).addTo(map).bindPopup(`<strong>Selected location</strong><br>${point.name}`); };
+  const placeMarker = (point: GeoPoint) => { marker?.remove(); marker = L.marker([point.lat, point.lon], { icon: iconFor('Drop-off') }).addTo(map).bindPopup(`<strong>Selected location</strong><br>${html(point.name)}`); };
   const select = (point: GeoPoint) => { placeMarker(point); marker?.openPopup(); onSelect(point); };
   if (initial) placeMarker(initial);
   map.on('click', (event: L.LeafletMouseEvent) => select({ lat: event.latlng.lat, lon: event.latlng.lng, name: 'Dropped map pin', district: 'Selected on map' }));
@@ -54,10 +69,28 @@ export function mountLocationMap(container: HTMLElement, initial: GeoPoint | nul
   return () => { line?.remove(); marker?.remove(); map.remove(); };
 }
 
-export function mountOverviewMap(container: HTMLElement, points: Array<GeoPoint & { kind: string; detail?: string }>): () => void {
-  const map = L.map(container, { maxBounds: bounds, minZoom: 11, maxZoom: 19 }).setView([1.295, 103.855], 13);
+export function mountOverviewMap(container: HTMLElement, points: Array<GeoPoint & { kind: string; detail?: string }>, paths: Array<[number, number][]> = []): () => void {
+  const user = points.find((point) => point.kind === 'Driver');
+  const map = L.map(container, { maxBounds: bounds, minZoom: 11, maxZoom: 19 }).setView(user ? [user.lat, user.lon] : [1.295, 103.855], user ? 14 : 13);
   L.tileLayer(import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
-  const layers = points.map((point) => L.marker([point.lat, point.lon]).addTo(map).bindPopup(`<strong>${point.kind}</strong><br>${point.name}${point.detail ? `<br>${point.detail}` : ''}`));
+  const layers: L.Layer[] = points.map((point) => L.marker([point.lat, point.lon], { icon: iconFor(point.kind) }).addTo(map).bindPopup(`<strong>${html(point.kind)}</strong><br>${html(point.name)}${point.detail ? `<br>${html(point.detail)}` : ''}`));
+  paths.filter((path) => path.length > 1).forEach((path) => layers.push(L.polyline(path, { color: '#159c99', weight: 6, opacity: .85 })));
   if (layers.length > 1) map.fitBounds(L.featureGroup(layers).getBounds(), { padding: [35, 35], maxZoom: 15 });
+  return () => map.remove();
+}
+
+/** Render the driver-facing route using the geo points and OSRM geometry. */
+export function mountRouteMap(
+  container: HTMLElement,
+  points: Array<GeoPoint & { kind: string; name: string; detail?: string }>,
+  paths: Array<[number, number][]>,
+): () => void {
+  const driver = points.find((point) => point.kind === 'Driver');
+  const map = L.map(container).setView(driver ? [driver.lat, driver.lon] : [1.3521, 103.8198], driver ? 14 : 12);
+  L.tileLayer(import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
+  const layers: L.Layer[] = points.map((point) => L.marker([point.lat, point.lon], { icon: iconFor(point.kind) }).addTo(map).bindPopup(`<strong>${html(point.kind)}</strong><br>${html(point.name)}${point.detail ? `<br>${html(point.detail)}` : ''}`));
+  paths.filter((path) => path.length > 1).forEach((path) => layers.push(L.polyline(path, { color: '#159c99', weight: 6, opacity: .85 }).addTo(map)));
+  const group = L.featureGroup(layers);
+  if (layers.length > 1) map.fitBounds(group.getBounds(), { padding: [30, 30], maxZoom: 15 });
   return () => map.remove();
 }

@@ -1,5 +1,5 @@
 import { tx } from './db.js';
-import { deliveries, orders, drivers, routes, roads, type DeliveryRow } from './repo.js';
+import { deliveries, orders, drivers, routes, roads, stores, type DeliveryRow } from './repo.js';
 import { emitAgentEvent } from './events.js';
 import { nowIso, conflict, badRequest } from './util.js';
 import { coordinator } from './agents/coordinator.js';
@@ -21,13 +21,14 @@ export function driverProgress(deliveryId: string, driverId: string, action: Dri
       await deliveries.setStatus(deliveryId, 'en_route_pickup', 'assigned');
       await emitAgentEvent({ agent: 'Driver', eventType: 'delivery_accepted', orderId: order.id, deliveryId, driverId, message: `Driver ${driverId} accepted the delivery for order ${order.id}` });
     } else if (action === 'picked_up') {
-      await drivers.recordLocation(driverId, order.pickup_lat, order.pickup_lng);
+      const store = await stores.byId(order.store_id);
+      await drivers.recordLocation(driverId, order.pickup_lat, order.pickup_lng, store?.address, store?.geo_lat, store?.geo_lng);
       await deliveries.setStatus(deliveryId, 'picked_up', ['en_route_pickup', 'assigned']);
       await deliveries.update(deliveryId, { pickup_at: nowIso() });
       try { await orders.setStatus(order.id, 'picked_up', ['assigned', 'dispatching']); } catch { /* keep */ }
       await emitAgentEvent({ agent: 'Driver', eventType: 'package_picked_up', orderId: order.id, deliveryId, driverId, message: `Driver ${driverId} picked up order ${order.id} at the merchant (${order.pickup_lat}, ${order.pickup_lng})` });
     } else {
-      await drivers.recordLocation(driverId, order.delivery_lat, order.delivery_lng);
+      await drivers.recordLocation(driverId, order.delivery_lat, order.delivery_lng, order.delivery_address, order.delivery_geo_lat, order.delivery_geo_lng);
       await deliveries.setStatus(deliveryId, 'delivered', ['picked_up', 'en_route_drop']);
       const assignedMs = delivery.assigned_at ? Date.parse(delivery.assigned_at) : Date.now();
       const actual = Number(((Date.now() - assignedMs) / 60_000).toFixed(1));
@@ -73,6 +74,8 @@ export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<Ti
     const order = await orders.byId(delivery.order_id);
     if (!order) continue;
     const pos: Point = { x: driver.lat, y: driver.lng as number };
+    const realPos: Point = driver.geo_lat != null && driver.geo_lng != null
+      ? { x: driver.geo_lng, y: driver.geo_lat } : pos;
 
     const paths = route.path_json ?? {};
     const phasePickup = ['assigned', 'en_route_pickup'].includes(delivery.status);
@@ -80,20 +83,26 @@ export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<Ti
     if (path.length < 1) continue;
 
     let idx = 0; let best = Infinity;
-    path.forEach((p, i) => { const d = Math.hypot(p.x - pos.x, p.y - pos.y); if (d <= best) { best = d; idx = i; } });
+    path.forEach((p, i) => { const d = Math.hypot(p.x - realPos.x, p.y - realPos.y); if (d <= best) { best = d; idx = i; } });
     let next = path[Math.min(idx + 1, path.length - 1)];
     const target = path[path.length - 1];
 
     // The real waypoint (unsnapped). When the step lands the driver on the last
     // path node, place them exactly on the pickup/customer so the arrival check
     // in driverProgress always passes.
-    const waypoint: Point = phasePickup
-      ? { x: order.pickup_lat, y: order.pickup_lng }
-      : { x: order.delivery_lat, y: order.delivery_lng };
+    const store = phasePickup ? await stores.byId(order.store_id) : null;
+    const waypoint: Point = phasePickup && store?.geo_lat != null && store.geo_lng != null
+      ? { x: store.geo_lng, y: store.geo_lat }
+      : !phasePickup && order.delivery_geo_lat != null && order.delivery_geo_lng != null
+        ? { x: order.delivery_geo_lng, y: order.delivery_geo_lat }
+        : phasePickup ? { x: order.pickup_lat, y: order.pickup_lng } : { x: order.delivery_lat, y: order.delivery_lng };
     const atTarget = Math.hypot(next.x - target.x, next.y - target.y) < 0.5;
     if (atTarget) next = waypoint;
 
-    await drivers.recordLocation(delivery.driver_id, next.x, next.y);
+    const nextGrid = next === waypoint || (driver.geo_lat == null && driver.geo_lng == null)
+      ? next : { x: geoToGrid(next.x, 103.74, 104.02), y: geoToGrid(next.y, 1.22, 1.39) };
+    await drivers.recordLocation(delivery.driver_id, nextGrid.x, nextGrid.y, undefined,
+      next === waypoint ? next.y : next.y, next === waypoint ? next.x : next.x);
     const record: TickResult['moved'][number] = { deliveryId: delivery.id, driverId: delivery.driver_id, from: pos, to: next };
     if (atTarget && phasePickup) {
       try {
@@ -115,6 +124,10 @@ export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<Ti
     ? { cycleId: '', findings: [], actions: [] }
     : await coordinator.runMonitoringCycle();
   return { moved, monitoring };
+}
+
+function geoToGrid(value: number, min: number, max: number): number {
+  return Math.max(0, Math.min(20, Math.round(((value - min) / (max - min)) * 20)));
 }
 
 export interface TrafficChange { closed: string[]; updated: string[] }

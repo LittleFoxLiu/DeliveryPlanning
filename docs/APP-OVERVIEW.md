@@ -124,7 +124,7 @@ Sub-nav: **Overview · Autonomous Ops · Orders · Fleet · Evaluation · Networ
 
 ### Overview (`#/admin/overview`)
 - Header actions: **▶ Simulate tick** (advance the sim), **Run monitoring** (one monitoring
-  cycle), **Simulate road status** (randomise every segment), **Reset demo**, and — when a
+  cycle), **Reset demo**, and — when a
   delivery is in flight — **⚠ Simulate traffic incident** (close a road on the active route).
 - Stat tiles: active orders, drivers available, deliveries in flight, road incidents.
 - **Network map**: every driver (with hover card: vehicle, status, load, position, current

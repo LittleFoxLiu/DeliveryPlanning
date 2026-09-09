@@ -6,6 +6,7 @@ import { renderAdmin } from './views/admin';
 import { renderMerchant } from './views/merchant';
 import { renderDriver } from './views/driver';
 import { renderCustomer } from './views/customer';
+import { searchNominatim } from './geoMap';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 let pollTimer: number | undefined;
@@ -154,9 +155,20 @@ function onboardingView(): void {
   stopPolling();
   app.innerHTML = `<div class="auth-screen"><div class="auth-card"><div class="brand"><span class="dot"></span><b>Set up your workspace</b></div><p class="auth-sub">Choose how you will use Delivery Planner.</p><form id="onboarding-form"><label>Account type<select name="role"><option value="customer">Customer</option><option value="merchant">Merchant</option><option value="driver">Driver</option><option value="admin">Admin</option></select></label><div id="role-fields"></div><button class="btn primary" type="submit">Continue</button></form></div></div>`;
   const form = app.querySelector<HTMLFormElement>('#onboarding-form')!; const fields = app.querySelector('#role-fields')!;
-  const draw = () => { const role = (form.elements.namedItem('role') as HTMLSelectElement).value; fields.innerHTML = role === 'merchant' ? '<label>Business name<input name="businessName" required></label><label>Store name<input name="storeName" required></label><label>Store address<input name="storeAddress" placeholder="Type the address"></label><label>Store X<input name="storeLat" type="number" min="0" max="20" value="10" required></label><label>Store Y<input name="storeLng" type="number" min="0" max="20" value="10" required></label>' : role === 'driver' ? '<label>Vehicle<select name="vehicleType"><option>car</option><option>bike</option><option>van</option><option>truck</option></select></label><label>Capacity<input name="capacity" type="number" min="1" max="20" value="4" required></label><label>Starting address<input name="address" placeholder="Type the address"></label><label>Starting X<input name="lat" type="number" min="0" max="20" value="10" required></label><label>Starting Y<input name="lng" type="number" min="0" max="20" value="10" required></label>' : '<p class="muted">You can join organizations later from your workspace.</p>'; };
+  const draw = () => { const role = (form.elements.namedItem('role') as HTMLSelectElement).value; fields.innerHTML = role === 'merchant' ? '<label>Business name<input name="businessName" required></label><label>Store name<input name="storeName" required></label><label>Store address<input name="storeAddress" data-address-search required placeholder="Search with Nominatim"></label><input name="storeGeoLat" type="hidden"><input name="storeGeoLng" type="hidden"><input name="storeLat" type="hidden" value="10"><input name="storeLng" type="hidden" value="10">' : role === 'driver' ? '<label>Vehicle<select name="vehicleType"><option>car</option><option>bike</option><option>van</option><option>truck</option></select></label><label>Capacity<input name="capacity" type="number" min="1" max="20" value="4" required></label><label>Starting address<input name="address" data-address-search required placeholder="Search with Nominatim"></label><input name="geoLat" type="hidden"><input name="geoLng" type="hidden"><input name="lat" type="hidden" value="10"><input name="lng" type="hidden" value="10">' : '<p class="muted">You can join organizations later from your workspace.</p>'; wireAddressFields(fields); };
   (form.elements.namedItem('role') as HTMLSelectElement).addEventListener('change', draw); draw();
   form.addEventListener('submit', async (e) => { e.preventDefault(); const fd = new FormData(form); const body: Record<string, unknown> = {}; fd.forEach((v, k) => { body[k] = v; }); body.capacity = Number(body.capacity); ['lat','lng','storeLat','storeLng'].forEach((k) => { if (body[k] !== undefined) body[k] = Number(body[k]); }); try { const r = await post<{ token: string; user: User }>('/onboarding/role', body); setSession(r.token, r.user); route(); } catch (err) { toast(err instanceof ApiError ? err.message : 'Setup failed', 'error'); } });
+}
+
+function wireAddressFields(container: Element): void {
+  container.querySelectorAll<HTMLInputElement>('[data-address-search]').forEach((input) => input.addEventListener('change', async () => {
+    const point = (await searchNominatim(input.value).catch(() => []))[0];
+    if (!point || !input.form) return;
+    input.value = point.name;
+    const prefix = input.name === 'storeAddress' ? 'store' : '';
+    (input.form.elements.namedItem(`${prefix}GeoLat`) as HTMLInputElement).value = String(point.lat);
+    (input.form.elements.namedItem(`${prefix}GeoLng`) as HTMLInputElement).value = String(point.lon);
+  }));
 }
 
 async function doLogin(email: string, password: string): Promise<void> {

@@ -150,8 +150,8 @@ export const drivers = {
     await q(`UPDATE driver_status SET current_order_count = GREATEST(0, current_order_count + ?), updated_at = ? WHERE driver_id = ?`,
       [delta, nowIso(), did]);
   },
-  async recordLocation(did: string, lat: number, lng: number) {
-    await q(`INSERT INTO driver_locations (driver_id, lat, lng) VALUES (?, ?, ?)`, [did, lat, lng]);
+  async recordLocation(did: string, lat: number, lng: number, address?: string | null, geoLat?: number | null, geoLng?: number | null) {
+    await q(`INSERT INTO driver_locations (driver_id, lat, lng, address, geo_lat, geo_lng) VALUES (?, ?, ?, ?, ?, ?)`, [did, lat, lng, address ?? null, geoLat ?? null, geoLng ?? null]);
   },
 };
 

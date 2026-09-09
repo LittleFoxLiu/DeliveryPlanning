@@ -3,12 +3,14 @@ import { get, post, patch, del, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../main';
 import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
 import { productGrid, cartSummary, cartCount, cartItems, wireCart, type Cart } from './shop';
+import { mountRouteMap, searchNominatim, type GeoPoint } from '../geoMap';
 
 interface MerchantOrders { orders: OrderDto[] }
 interface OrderDetail {
   order: OrderDto;
   delivery: OrderDto['delivery'];
-  assignedDriver: { name: string; vehicleType: string; status: string; location: { x: number; y: number } | null } | null;
+  assignedDriver: { name: string; vehicleType: string; status: string; location: { x: number; y: number } | null; geoLocation?: { lat: number; lon: number; address?: string | null } | null } | null;
+  route?: { path: { toPickup?: { x: number; y: number }[]; toDropoff?: { x: number; y: number }[] } } | null;
   events: { agent: string; message: string; ts: string }[];
   run?: PublicRun | null;
 }
@@ -17,6 +19,7 @@ let selected: string | null = null;
 let stores: { id: string; name: string; pickup: { x: number; y: number } }[] = [];
 let productList: ProductDto[] = [];
 let cart: Cart = {};
+let orderDeliveryGeo: GeoPoint | null = null;
 let currentPage = 'orders';
 
 export async function renderMerchant(el: HTMLElement, _user: unknown, page = 'orders'): Promise<void> {
@@ -31,7 +34,7 @@ export async function renderMerchant(el: HTMLElement, _user: unknown, page = 'or
       let detail: OrderDetail | null = null;
       if (selected && page === 'orders') { try { detail = await get<OrderDetail>(`/merchant/orders/${selected}`); } catch { detail = null; } }
       if (!changed('merchant', { orders, detail, selected, page, productList, cart })) return;
-      if (patchView(el, view(orders, detail))) wire(el); else resetSig('merchant');
+      if (patchView(el, view(orders, detail))) wire(el, detail); else resetSig('merchant');
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) handleUnauthed();
     }
@@ -67,7 +70,7 @@ function view(orders: OrderDto[], detail: OrderDetail | null): string {
             <tbody>${orders.map((o) => `
               <tr data-open="${esc(o.id)}" style="cursor:pointer;${o.id === selected ? 'background:#faf3f1' : ''}">
                 <td><strong>${esc(o.code)}</strong><br><span class="muted">${o.items.map((i) => `${esc(i.name)}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ') || '—'}</span></td>
-                <td>${esc(o.customerName)}<br><span class="muted">to (${o.dropoff.x}, ${o.dropoff.y})</span></td>
+                <td>${esc(o.customerName)}<br><span class="muted">to ${esc(o.dropoff.address || 'address unavailable')}</span></td>
                 <td>${o.itemsTotalCents ? money(o.itemsTotalCents) : '—'}</td>
                 <td>${statusChip(o.status)}</td>
                 <td>${fmtTime(o.deadlineTs)}</td>
@@ -120,19 +123,20 @@ function detailBody(d: OrderDetail): string {
   return `
     <dl class="kv">
       <dt>Customer</dt><dd>${esc(d.order.customerName)}</dd>
-      <dt>Deliver to</dt><dd>(${d.order.dropoff.x}, ${d.order.dropoff.y})</dd>
+      <dt>Deliver to</dt><dd>${esc(d.order.dropoff.address || 'address unavailable')}</dd>
       <dt>Items</dt><dd>${d.order.items.map((i) => `${esc(i.name)}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ') || '—'}</dd>
       <dt>Order total</dt><dd>${d.order.itemsTotalCents ? money(d.order.itemsTotalCents) : '—'}</dd>
       <dt>Status</dt><dd>${statusChip(d.order.status)}</dd>
       <dt>Priority</dt><dd>${esc(d.order.priority)}</dd>
       <dt>Package</dt><dd>${esc(d.order.packageSize)} · vol ${d.order.volume}</dd>
       <dt>Deadline</dt><dd>${fmtTime(d.order.deadlineTs)} (${minutesUntil(d.order.deadlineTs)}m)</dd>
-      <dt>Driver</dt><dd>${drv ? `${esc(drv.name)} · ${esc(drv.vehicleType)}${drv.location ? ` · at (${drv.location.x}, ${drv.location.y})` : ''}` : '—'}</dd>
+      <dt>Driver</dt><dd>${drv ? `${esc(drv.name)} · ${esc(drv.vehicleType)}${drv.location ? ' · at current location' : ''}` : '—'}</dd>
       <dt>ETA</dt><dd>${d.delivery?.etaTs ? `${fmtTime(d.delivery.etaTs)}${mins !== null ? ` (${mins}m)` : ''}` : '—'}</dd>
     </dl>
     <h3 style="margin-top:16px;font-size:13px">Agent trail</h3>
     ${eventFeed(d.events)}
-    ${agentDecisionCard(d.run)}`;
+    ${agentDecisionCard(d.run)}
+    <div id="merchant-route-map" class="geo-map" style="margin-top:16px"></div>`;
 }
 
 function newOrderCard(): string {
@@ -148,8 +152,9 @@ function newOrderCard(): string {
     <div style="margin:12px 0">${productGrid(products, cart)}</div>
     <div style="margin-bottom:12px">${cartSummary(products, cart)}</div>
     <form class="inline-form" id="new-order-tail">
-      <label>Drop X (0-20)<input name="deliveryLat" type="number" min="0" max="20" step="1" value="7" required></label>
-      <label>Drop Y (0-20)<input name="deliveryLng" type="number" min="0" max="20" step="1" value="4" required></label>
+      <label class="full">Delivery address<input name="deliveryAddress" data-merchant-address required placeholder="Search with Nominatim" value="${esc(orderDeliveryGeo?.name || '')}"></label>
+      <input name="deliveryLat" type="hidden" value="7"><input name="deliveryLng" type="hidden" value="4">
+      <input name="deliveryGeoLat" type="hidden" value="${orderDeliveryGeo?.lat ?? ''}"><input name="deliveryGeoLng" type="hidden" value="${orderDeliveryGeo?.lon ?? ''}">
       <label class="full">Note<input name="note" placeholder="optional delivery note"></label>
       <label class="full">Deadline<input name="deadlineTs" type="datetime-local" value="${soon}" required></label>
       <button class="btn primary full" type="submit"${cartCount(cart) ? '' : ' disabled'}>Create order</button>
@@ -157,8 +162,27 @@ function newOrderCard(): string {
   </div>`;
 }
 
-function wire(el: HTMLElement): void {
+function wire(el: HTMLElement, detail: OrderDetail | null = null): void {
+  const routeMap = el.querySelector<HTMLElement>('#merchant-route-map');
+  if (routeMap && detail) {
+    const points: Array<GeoPoint & { kind: string; name: string; detail?: string }> = [];
+    if (detail.assignedDriver?.geoLocation) points.push({ ...detail.assignedDriver.geoLocation, kind: 'Driver', name: detail.assignedDriver.name, detail: detail.assignedDriver.status });
+    if (detail.order.pickup.lat != null && detail.order.pickup.lon != null) points.push({ lat: detail.order.pickup.lat, lon: detail.order.pickup.lon, kind: 'Pickup', name: detail.order.storeName || 'Merchant pickup', detail: detail.order.pickup.address || undefined });
+    if (detail.order.dropoff.lat != null && detail.order.dropoff.lon != null) points.push({ lat: detail.order.dropoff.lat, lon: detail.order.dropoff.lon, kind: 'Drop-off', name: detail.order.customerName, detail: detail.order.dropoff.address || undefined });
+    const path = [...(detail.route?.path.toPickup ?? []), ...(detail.route?.path.toDropoff ?? [])].map((p) => [p.y, p.x] as [number, number]);
+    mountRouteMap(routeMap, points, path.length > 1 ? [path] : []);
+  }
   const repaint = () => renderMerchant(el, null, currentPage);
+  const address = el.querySelector<HTMLInputElement>('[data-merchant-address]');
+  address?.addEventListener('change', async () => {
+    const point = (await searchNominatim(address.value).catch(() => []))[0];
+    if (!point) return;
+    orderDeliveryGeo = point;
+    address.value = point.name;
+    const form = address.form!;
+    (form.elements.namedItem('deliveryGeoLat') as HTMLInputElement).value = String(point.lat);
+    (form.elements.namedItem('deliveryGeoLng') as HTMLInputElement).value = String(point.lon);
+  });
 
   el.querySelectorAll<HTMLElement>('[data-open]').forEach((r) => r.addEventListener('click', (e) => {
     if ((e.target as HTMLElement).closest('button')) return;
@@ -229,11 +253,13 @@ function wire(el: HTMLElement): void {
       await post('/merchant/orders', {
         storeId: h.get('storeId'), customerName: h.get('customerName'), priority: h.get('priority'),
         deliveryLat: Number(t.get('deliveryLat')), deliveryLng: Number(t.get('deliveryLng')),
+        deliveryAddress: t.get('deliveryAddress'), deliveryGeoLat: Number(t.get('deliveryGeoLat')), deliveryGeoLng: Number(t.get('deliveryGeoLng')),
         note: t.get('note') || undefined,
         deadlineTs: new Date(String(t.get('deadlineTs'))).toISOString(),
         items: cartItems(cart),
       });
       cart = {};
+      orderDeliveryGeo = null;
       toast('Order created');
       selected = null;
       goto('orders');
