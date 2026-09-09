@@ -3,6 +3,7 @@ import { deliveries, orders, drivers, routes, roads, stores, type DeliveryRow } 
 import { emitAgentEvent } from './events.js';
 import { nowIso, conflict, badRequest } from './util.js';
 import { coordinator } from './agents/coordinator.js';
+import { geoToGrid } from './engine/geo.js';
 import type { Point } from './engine/routing.js';
 
 type DriverAction = 'accept' | 'picked_up' | 'delivered';
@@ -57,10 +58,10 @@ export interface TickResult {
   monitoring: Awaited<ReturnType<typeof coordinator.runMonitoringCycle>>;
 }
 
-/** Simulator: advance every in-flight driver one grid step along their active
- *  route, auto-transitioning on arrival, then run one monitoring cycle.
- *  `monitor: false` skips the monitoring/remediation pass (used for the
- *  no-autonomy baseline in the evaluation centre). */
+/** Simulator: advance every in-flight driver a few steps along their active
+ *  route geometry (real OSRM lat/lon), auto-transitioning on arrival, then run
+ *  one monitoring cycle. `monitor: false` skips the monitoring/remediation pass
+ *  (used for the no-autonomy baseline in the evaluation centre). */
 export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<TickResult> {
   const moved: TickResult['moved'] = [];
 
@@ -70,39 +71,38 @@ export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<Ti
     const route = await routes.activeForDelivery(delivery.id);
     if (!route) continue;
     const driver = await drivers.byId(delivery.driver_id);
-    if (!driver || driver.lat == null || driver.status === 'offline') continue;
+    if (!driver || driver.status === 'offline') continue;
     const order = await orders.byId(delivery.order_id);
     if (!order) continue;
-    const pos: Point = { x: driver.lat, y: driver.lng as number };
-    const realPos: Point = driver.geo_lat != null && driver.geo_lng != null
-      ? { x: driver.geo_lng, y: driver.geo_lat } : pos;
 
-    const paths = route.path_json ?? {};
     const phasePickup = ['assigned', 'en_route_pickup'].includes(delivery.status);
-    const path = (phasePickup ? paths.toPickup : paths.toDropoff) ?? [];
+    // Route path nodes are real coordinates: { x: lon, y: lat }.
+    const path = ((route.path_json ?? {})[phasePickup ? 'toPickup' : 'toDropoff'] ?? []) as { x: number; y: number }[];
     if (path.length < 1) continue;
 
-    let idx = 0; let best = Infinity;
-    path.forEach((p, i) => { const d = Math.hypot(p.x - realPos.x, p.y - realPos.y); if (d <= best) { best = d; idx = i; } });
-    let next = path[Math.min(idx + 1, path.length - 1)];
-    const target = path[path.length - 1];
-
-    // The real waypoint (unsnapped). When the step lands the driver on the last
-    // path node, place them exactly on the pickup/customer so the arrival check
-    // in driverProgress always passes.
     const store = phasePickup ? await stores.byId(order.store_id) : null;
-    const waypoint: Point = phasePickup && store?.geo_lat != null && store.geo_lng != null
-      ? { x: store.geo_lng, y: store.geo_lat }
-      : !phasePickup && order.delivery_geo_lat != null && order.delivery_geo_lng != null
-        ? { x: order.delivery_geo_lng, y: order.delivery_geo_lat }
-        : phasePickup ? { x: order.pickup_lat, y: order.pickup_lng } : { x: order.delivery_lat, y: order.delivery_lng };
-    const atTarget = Math.hypot(next.x - target.x, next.y - target.y) < 0.5;
-    if (atTarget) next = waypoint;
+    // where the driver currently is, in real coordinates
+    const cur = driver.geo_lat != null && driver.geo_lng != null
+      ? { lon: driver.geo_lng, lat: driver.geo_lat }
+      : { lon: path[0].x, lat: path[0].y };
+    // real waypoint at the end of this leg
+    const wp = phasePickup
+      ? { lon: store?.geo_lng ?? path[path.length - 1].x, lat: store?.geo_lat ?? path[path.length - 1].y }
+      : { lon: order.delivery_geo_lng ?? path[path.length - 1].x, lat: order.delivery_geo_lat ?? path[path.length - 1].y };
 
-    const nextGrid = next === waypoint || (driver.geo_lat == null && driver.geo_lng == null)
-      ? next : { x: geoToGrid(next.x, 103.74, 104.02), y: geoToGrid(next.y, 1.22, 1.39) };
-    await drivers.recordLocation(delivery.driver_id, nextGrid.x, nextGrid.y, undefined,
-      next === waypoint ? next.y : next.y, next === waypoint ? next.x : next.x);
+    // nearest node on the remaining route, then advance ~1/10th of the leg
+    let idx = 0; let best = Infinity;
+    path.forEach((p, i) => { const d = (p.x - cur.lon) ** 2 + (p.y - cur.lat) ** 2; if (d <= best) { best = d; idx = i; } });
+    const step = Math.max(1, Math.ceil(path.length / 10));
+    let ni = idx + step;
+    const atTarget = ni >= path.length - 1;
+    const nextGeo = atTarget ? { lon: wp.lon, lat: wp.lat } : { lon: path[ni].x, lat: path[ni].y };
+
+    const grid = geoToGrid(nextGeo.lat, nextGeo.lon);
+    await drivers.recordLocation(delivery.driver_id, grid.x, grid.y, undefined, nextGeo.lat, nextGeo.lon);
+    const pos: Point = { x: driver.lat ?? grid.x, y: (driver.lng as number) ?? grid.y };
+    const next: Point = { x: grid.x, y: grid.y };
+    void ni;
     const record: TickResult['moved'][number] = { deliveryId: delivery.id, driverId: delivery.driver_id, from: pos, to: next };
     if (atTarget && phasePickup) {
       try {
@@ -124,10 +124,6 @@ export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<Ti
     ? { cycleId: '', findings: [], actions: [] }
     : await coordinator.runMonitoringCycle();
   return { moved, monitoring };
-}
-
-function geoToGrid(value: number, min: number, max: number): number {
-  return Math.max(0, Math.min(20, Math.round(((value - min) / (max - min)) * 20)));
 }
 
 export interface TrafficChange { closed: string[]; updated: string[] }

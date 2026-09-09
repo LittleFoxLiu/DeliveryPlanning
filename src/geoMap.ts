@@ -23,6 +23,79 @@ const icons: Record<string, L.DivIcon> = {
 const iconFor = (kind?: string) => icons[kind || ''] || icons['Drop-off'];
 const html = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c] as string));
 
+const TIP_OPTS: L.TooltipOptions = { direction: 'top', offset: [0, -12], opacity: 1, className: 'geo-tip' };
+/** Show marker info on hover, not on click. */
+function hoverInfo(marker: L.Marker, content: string): L.Marker {
+  return marker.bindTooltip(content, TIP_OPTS);
+}
+
+const TILE_URL = import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+const TILE_OPTS: L.TileLayerOptions = { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 };
+
+interface LiveMap { map: L.Map; overlay: L.LayerGroup; fitted: boolean; pickMarker?: L.Marker; pickLine?: L.Polyline; clickHandler?: (e: L.LeafletMouseEvent) => void }
+/** One persistent Leaflet instance per DOM node — survives view re-renders. */
+const LIVE = new WeakMap<HTMLElement, LiveMap>();
+
+/** Get-or-create the map for a container. `patchView` keeps the node ([data-keep])
+ *  so on a re-render we reuse the instance and only swap the overlay layers —
+ *  no tile reload, no flicker, and the user's pan/zoom is preserved. */
+function liveMap(container: HTMLElement, opts?: L.MapOptions): LiveMap {
+  const existing = LIVE.get(container);
+  if (existing && container.isConnected) {
+    existing.map.invalidateSize();
+    return existing;
+  }
+  existing?.map.remove();
+  const map = L.map(container, { maxBounds: bounds, minZoom: 11, maxZoom: 19, ...opts });
+  L.tileLayer(TILE_URL, TILE_OPTS).addTo(map);
+  const overlay = L.layerGroup().addTo(map);
+  const entry: LiveMap = { map, overlay, fitted: false };
+  LIVE.set(container, entry);
+  return entry;
+}
+
+interface MarkerPoint { lat: number; lon: number; kind: string; name: string; detail?: string }
+
+/** Replace the markers + polylines on a live map without touching the base map. */
+function drawOverlay(entry: LiveMap, points: MarkerPoint[], paths: Array<[number, number][]>, fitZoom = 15): void {
+  entry.overlay.clearLayers();
+  const layers: L.Layer[] = [];
+  for (const p of points) {
+    if (!Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue;
+    const m = hoverInfo(
+      L.marker([p.lat, p.lon], { icon: iconFor(p.kind) }),
+      `<strong>${html(p.kind)}</strong><br>${html(p.name)}${p.detail ? `<br>${html(p.detail)}` : ''}`,
+    );
+    m.addTo(entry.overlay);
+    layers.push(m);
+  }
+  for (const path of paths) {
+    if (path.length < 2) continue;
+    const line = L.polyline(path, { color: '#159c99', weight: 6, opacity: .85 });
+    line.addTo(entry.overlay);
+    layers.push(line);
+  }
+  // Fit to content only on the first paint — later updates keep the user's view.
+  if (!entry.fitted && layers.length) {
+    entry.map.fitBounds(L.featureGroup(layers).getBounds(), { padding: [35, 35], maxZoom: fitZoom });
+    entry.fitted = true;
+  } else if (!entry.fitted && !layers.length) {
+    entry.map.setView([1.3521, 103.8198], 12);
+    entry.fitted = true;
+  }
+}
+
+function destroy(container: HTMLElement): void {
+  const e = LIVE.get(container);
+  if (e) { e.map.remove(); LIVE.delete(container); }
+}
+
+// When patchView discards a kept map node (view navigated away), tear it down.
+document.addEventListener('dp:keep-dropped', (ev) => {
+  const node = (ev as CustomEvent).detail as HTMLElement | null;
+  if (node && LIVE.has(node)) destroy(node);
+});
+
 export async function searchNominatim(query: string, signal?: AbortSignal): Promise<GeoPoint[]> {
   if (query.trim().length < 3) return [];
   const params = new URLSearchParams({ q: `${query}, Singapore`, format: 'jsonv2', limit: '5', countrycodes: 'sg', addressdetails: '1' });
@@ -56,41 +129,57 @@ export function openLocationPicker(initial: GeoPoint | null, onSelect: (point: G
   window.addEventListener('message', receive);
 }
 
+/** Click-to-pick location map. Idempotent — keeps the instance (and the user's
+ *  pan) across re-renders while re-binding the current callback / marker. */
 export function mountLocationMap(container: HTMLElement, initial: GeoPoint | null, onSelect: (point: GeoPoint) => void, route: GeoRoute | null = null): () => void {
-  const map = L.map(container, { maxBounds: bounds, minZoom: 11, maxZoom: 19 }).setView(initial ? [initial.lat, initial.lon] : [1.295, 103.855], 13);
-  L.tileLayer(import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
-  let marker: L.Marker | undefined;
-  let line: L.Polyline | undefined;
-  const placeMarker = (point: GeoPoint) => { marker?.remove(); marker = L.marker([point.lat, point.lon], { icon: iconFor('Drop-off') }).addTo(map).bindPopup(`<strong>Selected location</strong><br>${html(point.name)}`); };
-  const select = (point: GeoPoint) => { placeMarker(point); marker?.openPopup(); onSelect(point); };
-  if (initial) placeMarker(initial);
-  map.on('click', (event: L.LeafletMouseEvent) => select({ lat: event.latlng.lat, lon: event.latlng.lng, name: 'Dropped map pin', district: 'Selected on map' }));
-  if (route?.geometry.length) { line = L.polyline(route.geometry, { color: '#df553d', weight: 6, opacity: .9 }).addTo(map); map.fitBounds(line.getBounds(), { padding: [35, 35], maxZoom: 15 }); }
-  return () => { line?.remove(); marker?.remove(); map.remove(); };
+  const entry = liveMap(container);
+  const { map } = entry;
+
+  const placeMarker = (point: GeoPoint) => {
+    entry.pickMarker?.remove();
+    entry.pickMarker = hoverInfo(L.marker([point.lat, point.lon], { icon: iconFor('Drop-off') }).addTo(map), `<strong>Selected location</strong><br>${html(point.name)}`);
+  };
+  if (initial && !entry.pickMarker) placeMarker(initial);
+  else if (initial && entry.pickMarker) entry.pickMarker.setLatLng([initial.lat, initial.lon]);
+
+  // rebind the click handler so it always calls the latest onSelect
+  if (entry.clickHandler) map.off('click', entry.clickHandler);
+  entry.clickHandler = (event: L.LeafletMouseEvent) => {
+    const point: GeoPoint = { lat: event.latlng.lat, lon: event.latlng.lng, name: 'Dropped map pin', district: 'Selected on map' };
+    placeMarker(point);
+    entry.pickMarker?.openTooltip();
+    onSelect(point);
+  };
+  map.on('click', entry.clickHandler);
+
+  entry.pickLine?.remove();
+  entry.pickLine = undefined;
+  if (route?.geometry.length) {
+    entry.pickLine = L.polyline(route.geometry, { color: '#df553d', weight: 6, opacity: .9 }).addTo(map);
+    if (!entry.fitted) { map.fitBounds(entry.pickLine.getBounds(), { padding: [35, 35], maxZoom: 15 }); entry.fitted = true; }
+  } else if (!entry.fitted) {
+    map.setView(initial ? [initial.lat, initial.lon] : [1.295, 103.855], 13);
+    entry.fitted = true;
+  }
+  return () => destroy(container);
 }
 
-export function mountOverviewMap(container: HTMLElement, points: Array<GeoPoint & { kind: string; detail?: string }>, paths: Array<[number, number][]> = []): () => void {
-  const user = points.find((point) => point.kind === 'Driver');
-  const map = L.map(container, { maxBounds: bounds, minZoom: 11, maxZoom: 19 }).setView(user ? [user.lat, user.lon] : [1.295, 103.855], user ? 14 : 13);
-  L.tileLayer(import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
-  const layers: L.Layer[] = points.map((point) => L.marker([point.lat, point.lon], { icon: iconFor(point.kind) }).addTo(map).bindPopup(`<strong>${html(point.kind)}</strong><br>${html(point.name)}${point.detail ? `<br>${html(point.detail)}` : ''}`));
-  paths.filter((path) => path.length > 1).forEach((path) => layers.push(L.polyline(path, { color: '#159c99', weight: 6, opacity: .85 })));
-  if (layers.length > 1) map.fitBounds(L.featureGroup(layers).getBounds(), { padding: [35, 35], maxZoom: 15 });
-  return () => map.remove();
+/** Admin network map. Idempotent: safe to call on every poll — reuses the live
+ *  instance and only swaps markers/routes. */
+export function mountOverviewMap(container: HTMLElement, points: MarkerPoint[], paths: Array<[number, number][]> = []): () => void {
+  const entry = liveMap(container);
+  drawOverlay(entry, points, paths);
+  return () => destroy(container);
 }
 
-/** Render the driver-facing route using the geo points and OSRM geometry. */
+/** Driver / customer route map. Idempotent — same instance across re-renders,
+ *  so the driver pin just moves instead of the whole map reloading. */
 export function mountRouteMap(
   container: HTMLElement,
-  points: Array<GeoPoint & { kind: string; name: string; detail?: string }>,
+  points: MarkerPoint[],
   paths: Array<[number, number][]>,
 ): () => void {
-  const driver = points.find((point) => point.kind === 'Driver');
-  const map = L.map(container).setView(driver ? [driver.lat, driver.lon] : [1.3521, 103.8198], driver ? 14 : 12);
-  L.tileLayer(import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
-  const layers: L.Layer[] = points.map((point) => L.marker([point.lat, point.lon], { icon: iconFor(point.kind) }).addTo(map).bindPopup(`<strong>${html(point.kind)}</strong><br>${html(point.name)}${point.detail ? `<br>${html(point.detail)}` : ''}`));
-  paths.filter((path) => path.length > 1).forEach((path) => layers.push(L.polyline(path, { color: '#159c99', weight: 6, opacity: .85 }).addTo(map)));
-  const group = L.featureGroup(layers);
-  if (layers.length > 1) map.fitBounds(group.getBounds(), { padding: [30, 30], maxZoom: 15 });
-  return () => map.remove();
+  const entry = liveMap(container);
+  drawOverlay(entry, points, paths);
+  return () => destroy(container);
 }

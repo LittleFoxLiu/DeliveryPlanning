@@ -4,6 +4,7 @@ import { esc, toast, statusChip, fmtTime, minutesUntil } from '../ui';
 import { enableMapTooltips } from '../map';
 import type { Point } from '../types';
 import { mountLocationMap, mountRouteMap, type GeoPoint } from '../geoMap';
+import { gridToGeo, geoToGrid } from '../geo';
 
 interface DriverDelivery {
   id: string; status: string; etaTs: string | null; estimatedDeliveryMinutes: number | null;
@@ -42,20 +43,10 @@ function nextTarget(d: DriverDelivery): { label: string; at: Point } {
 
 function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
   const done = all.filter((d) => d.status === 'delivered').length;
-  const geoPoints: Array<GeoPoint & { kind: string; name: string; detail?: string }> = [];
-
-  if (me.geoLocation) {
-    geoPoints.push({ ...me.geoLocation, kind: 'Driver', name: `You (${me.name})`, detail: me.status.replace(/_/g, ' ') });
-  }
-  active.forEach((d) => {
-    if (d.pickup.lat != null && d.pickup.lon != null) geoPoints.push({ lat: d.pickup.lat, lon: d.pickup.lon, kind: 'Pickup', name: d.pickup.name || 'Merchant', detail: d.order.code });
-    if (d.dropoff.lat != null && d.dropoff.lon != null) geoPoints.push({ lat: d.dropoff.lat, lon: d.dropoff.lon, kind: 'Drop-off', name: d.order.customerName, detail: d.order.code });
-  });
-
   const here = me.address || 'Current location unavailable';
   const mapCard = (selectable: boolean) => `<div class="card">
-    <div class="card-head"><h2>${selectable ? 'Your position' : 'Your route'}</h2><span class="muted">you are the teal dot</span></div>
-    ${selectable ? `<div id="driver-position-map" class="geo-map" data-driver-location="${me.location ? `${me.location.x},${me.location.y}` : ''}"></div><p class="muted geo-help">Click anywhere on the map to set your current position.</p>` : `<div id="driver-route-map" class="geo-map"></div>${!geoPoints.length ? '<p class="muted">Geo route data is not available for this delivery yet.</p>' : ''}`}
+    <div class="card-head"><h2>${selectable ? 'Your position' : 'Your route'}</h2><span class="muted">hover a pin for details</span></div>
+    ${selectable ? `<div id="driver-position-map" data-keep="driver-position-map" class="geo-map" data-driver-location="${me.location ? `${me.location.x},${me.location.y}` : ''}"></div><p class="muted geo-help">Click anywhere on the map to set your current position.</p>` : `<div id="driver-route-map" data-keep="driver-route-map" class="geo-map"></div>${!active.length ? '<p class="muted">No active delivery route to show.</p>' : ''}`}
   </div>`;
 
   if (currentPage === 'account') {
@@ -129,11 +120,11 @@ function wire(el: HTMLElement, active: DriverDelivery[], me: Me): void {
   if (positionMap) {
     const location = el.querySelector<HTMLElement>('[data-driver-location]');
     const raw = location?.dataset.driverLocation?.split(',').map(Number);
-    const initial = raw && raw.length === 2 ? gridToGeo(raw[0], raw[1]) : null;
+    const g = raw && raw.length === 2 ? gridToGeo(raw[0], raw[1]) : null;
+    const initial: GeoPoint | null = g ? { ...g, name: me.address || 'Current position' } : null;
     mountLocationMap(positionMap, initial, async (point) => {
-      const x = geoToGrid(point.lon, 103.74, 104.02);
-      const y = geoToGrid(point.lat, 1.22, 1.39);
-      try { await post('/driver/location', { lat: x, lng: y, geoLat: point.lat, geoLng: point.lon, address: point.name }); selectingPosition = false; toast(`Position updated to ${point.name || 'selected location'}`); repaint(); }
+      const grid = geoToGrid(point.lat, point.lon);
+      try { await post('/driver/location', { lat: grid.x, lng: grid.y, geoLat: point.lat, geoLng: point.lon, address: point.name }); selectingPosition = false; toast(`Position updated to ${point.name || 'selected location'}`); repaint(); }
       catch (err) { toast(err instanceof ApiError ? err.message : 'Position update failed', 'error'); }
     });
   }
@@ -143,8 +134,10 @@ function wire(el: HTMLElement, active: DriverDelivery[], me: Me): void {
     const paths: [number, number][][] = [];
     if (me.geoLocation) points.push({ ...me.geoLocation, kind: 'Driver', name: `You (${me.name})`, detail: me.status.replace(/_/g, ' ') });
     active.forEach((d) => {
-      if (d.pickup.lat != null && d.pickup.lon != null) points.push({ lat: d.pickup.lat, lon: d.pickup.lon, kind: 'Pickup', name: d.pickup.name || 'Merchant', detail: d.order.code });
-      if (d.dropoff.lat != null && d.dropoff.lon != null) points.push({ lat: d.dropoff.lat, lon: d.dropoff.lon, kind: 'Drop-off', name: d.order.customerName, detail: d.order.code });
+      const pg = d.pickup.lat != null && d.pickup.lon != null ? { lat: d.pickup.lat, lon: d.pickup.lon } : gridToGeo(d.pickup.x, d.pickup.y);
+      const dg = d.dropoff.lat != null && d.dropoff.lon != null ? { lat: d.dropoff.lat, lon: d.dropoff.lon } : gridToGeo(d.dropoff.x, d.dropoff.y);
+      points.push({ lat: pg.lat, lon: pg.lon, kind: 'Pickup', name: d.pickup.name || 'Merchant', detail: d.order.code });
+      points.push({ lat: dg.lat, lon: dg.lon, kind: 'Drop-off', name: d.order.customerName, detail: d.order.code });
       const path = [...(d.route?.path.toPickup ?? []), ...(d.route?.path.toDropoff ?? [])];
       if (path.length > 1) paths.push(path.map((p) => [p.y, p.x]));
     });
@@ -159,9 +152,6 @@ function wire(el: HTMLElement, active: DriverDelivery[], me: Me): void {
     run(() => post('/driver/status', { status: b.dataset.status }), `Status: ${b.dataset.status}`, el);
   }));
 }
-
-function gridToGeo(x: number, y: number): GeoPoint { return { lat: 1.22 + (y / 20) * .17, lon: 103.74 + (x / 20) * .28, name: 'Current position' }; }
-function geoToGrid(value: number, min: number, max: number): number { return Math.max(0, Math.min(20, Math.round(((value - min) / (max - min)) * 20))); }
 
 async function run(fn: () => Promise<unknown>, ok: string, el: HTMLElement): Promise<void> {
   try { await fn(); toast(ok); renderDriver(el, null, currentPage); }

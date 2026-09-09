@@ -136,7 +136,7 @@ function detailBody(d: OrderDetail): string {
     <h3 style="margin-top:16px;font-size:13px">Agent trail</h3>
     ${eventFeed(d.events)}
     ${agentDecisionCard(d.run)}
-    <div id="merchant-route-map" class="geo-map" style="margin-top:16px"></div>`;
+    <div id="merchant-route-map" data-keep="merchant-route-map" class="geo-map" style="margin-top:16px"></div>`;
 }
 
 function newOrderCard(): string {

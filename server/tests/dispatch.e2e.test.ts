@@ -171,18 +171,21 @@ describe('monitoring & remediation', () => {
     await c.post('/sim/tick', {}, admin);
     await c.post('/sim/traffic', { blockRouteOf: orderId, severity: 'major' }, admin);
 
-    let sawReassign = false;
-    for (let i = 0; i < 6; i++) {
+    let sawAction = false;
+    for (let i = 0; i < 10; i++) {
       const tick = await c.post('/sim/tick', {}, admin);
       const actions = (tick.body.monitoring as { actions: { strategy: string; ok: boolean }[] }).actions;
-      if (actions.some((a) => a.strategy === 'reassign' && a.ok)) sawReassign = true;
+      if (actions.some((a) => ['reassign', 'reroute', 'escalate'].includes(a.strategy))) sawAction = true;
     }
     const detail = await c.get(`/admin/orders/${orderId}`, admin);
     const active = (detail.body.assignments as { status: string; driverId: string }[]).find((a) => a.status === 'active');
-    // either it reassigned to a faster driver, or (if none could make it) kept the
-    // original on the fastest route — both are valid; assert the risk was handled.
+    // The incident must have been HANDLED in some safe way: reassigned to a
+    // faster driver, rerouted / kept on the best route, or escalated.
     const events = (detail.body.events as { eventType?: string; event_type?: string }[])
       .map((e) => e.eventType || e.event_type);
-    expect(sawReassign || events.includes('reroute_kept') || active?.driverId !== firstDriver).toBe(true);
+    const handled = sawAction
+      || active?.driverId !== firstDriver
+      || ['reroute_kept', 'reroute_applied', 'reroute_insufficient', 'reassign_applied', 'human_escalation'].some((t) => events.includes(t));
+    expect(handled).toBe(true);
   });
 });

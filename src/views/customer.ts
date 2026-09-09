@@ -5,6 +5,7 @@ import { enableMapTooltips } from '../map';
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
 import type { Point, ProductDto } from '../types';
 import { mountLocationMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
+import { gridToGeo, geoToGrid } from '../geo';
 
 interface Tracking {
   order: { id: string; status: string; priority: string; deadlineTs: string; pickup?: Point & { address?: string; lat?: number; lon?: number }; dropoff: Point & { address?: string; lat?: number; lon?: number }; items: { name: string; qty: number }[] };
@@ -113,7 +114,7 @@ function trackingCard(t: Tracking): string {
 }
 
 function mapFor(t: Tracking): string {
-  return '<div id="customer-live-map" class="geo-map"></div>';
+  return '<div id="customer-live-map" data-keep="customer-live-map" class="geo-map"></div>';
 }
 
 /* ------------------------------------------------------------------ wizard */
@@ -171,7 +172,7 @@ function stepDelivery(): string {
       <label class="full">Delivery address<input id="delivery-search" placeholder="Type an address or search with Nominatim" autocomplete="off" value="${esc(deliveryGeo?.name || deliveryAddress)}"></label>
       <button type="button" class="btn full" data-open-location-picker>Open map in a new window</button>
       <div id="delivery-results" class="geo-results full"></div>
-      <div id="delivery-map" class="geo-map full"></div>
+      <div id="delivery-map" data-keep="delivery-map" class="geo-map full"></div>
       <p class="muted full geo-help">Click the map to drop your delivery pin. ${deliveryGeo ? `Selected: <strong>${esc(deliveryGeo.name)}</strong>` : 'No pin selected yet.'}</p>
       <input name="deliveryLat" type="hidden" value="${draft.deliveryLat}">
       <input name="deliveryLng" type="hidden" value="${draft.deliveryLng}">
@@ -221,11 +222,19 @@ function saveDeliveryForm(el: HTMLElement): void {
 function wire(el: HTMLElement): void {
   enableMapTooltips(el);
   const liveMap = el.querySelector<HTMLElement>('#customer-live-map');
-  if (liveMap && lastTracking?.order.dropoff.lat != null && lastTracking.order.dropoff.lon != null) {
-    const points = [{ lat: lastTracking.order.dropoff.lat, lon: lastTracking.order.dropoff.lon, kind: 'Drop-off', name: lastTracking.order.dropoff.address || 'Delivery address' }];
-    if (lastTracking.order.pickup?.lat != null && lastTracking.order.pickup.lon != null) points.push({ lat: lastTracking.order.pickup.lat, lon: lastTracking.order.pickup.lon, kind: 'Pickup', name: 'Merchant pickup' });
-    if (lastTracking.delivery?.driverPositionGeo) points.push({ lat: lastTracking.delivery.driverPositionGeo.lat, lon: lastTracking.delivery.driverPositionGeo.lon, kind: 'Driver', name: 'Your driver' });
-    const path = [...(lastTracking.delivery?.route?.path.toPickup ?? []), ...(lastTracking.delivery?.route?.path.toDropoff ?? [])];
+  if (liveMap && lastTracking) {
+    const t = lastTracking;
+    const dg = t.order.dropoff.lat != null && t.order.dropoff.lon != null
+      ? { lat: t.order.dropoff.lat, lon: t.order.dropoff.lon } : gridToGeo(t.order.dropoff.x, t.order.dropoff.y);
+    const points = [{ lat: dg.lat, lon: dg.lon, kind: 'Drop-off', name: t.order.dropoff.address || 'Delivery address' }];
+    if (t.order.pickup) {
+      const pg = t.order.pickup.lat != null && t.order.pickup.lon != null
+        ? { lat: t.order.pickup.lat, lon: t.order.pickup.lon } : gridToGeo(t.order.pickup.x, t.order.pickup.y);
+      points.push({ lat: pg.lat, lon: pg.lon, kind: 'Pickup', name: 'Merchant pickup' });
+    }
+    if (t.delivery?.driverPositionGeo) points.push({ lat: t.delivery.driverPositionGeo.lat, lon: t.delivery.driverPositionGeo.lon, kind: 'Driver', name: 'Your driver' });
+    else if (t.delivery?.driverPosition) { const g = gridToGeo(t.delivery.driverPosition.x, t.delivery.driverPosition.y); points.push({ lat: g.lat, lon: g.lon, kind: 'Driver', name: 'Your driver' }); }
+    const path = [...(t.delivery?.route?.path.toPickup ?? []), ...(t.delivery?.route?.path.toDropoff ?? [])];
     import('../geoMap').then(({ mountRouteMap }) => mountRouteMap(liveMap, points, path.length > 1 ? [path.map((p) => [p.y, p.x] as [number, number])] : []));
   }
   el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; repaint(el); }));
@@ -245,8 +254,9 @@ function wire(el: HTMLElement): void {
     mountLocationMap(geoMap, deliveryGeo, async (point) => {
       deliveryGeo = point;
       deliveryRoute = pickup ? await routeWithOsrm(pickup, point).catch(() => null) : null;
-      draft.deliveryLat = geoToGrid(point.lat, 1.22, 1.39);
-      draft.deliveryLng = geoToGrid(point.lon, 103.74, 104.02);
+      const grid = geoToGrid(point.lat, point.lon);
+      draft.deliveryLat = grid.x;
+      draft.deliveryLng = grid.y;
       repaint(el);
     }, deliveryRoute);
   }
@@ -260,7 +270,8 @@ function wire(el: HTMLElement): void {
     } catch { results.textContent = 'Address search unavailable.'; }
   }, 500); });
   el.querySelector<HTMLButtonElement>('[data-open-location-picker]')?.addEventListener('click', () => openLocationPicker(deliveryGeo, (point) => {
-    deliveryGeo = point; deliveryRoute = null; draft.deliveryLat = geoToGrid(point.lat, 1.22, 1.39); draft.deliveryLng = geoToGrid(point.lon, 103.74, 104.02); repaint(el);
+    deliveryGeo = point; deliveryRoute = null;
+    const grid = geoToGrid(point.lat, point.lon); draft.deliveryLat = grid.x; draft.deliveryLng = grid.y; repaint(el);
   }));
   wireCart(el, cart, () => repaint(el));
 
@@ -305,5 +316,3 @@ function wire(el: HTMLElement): void {
   });
 }
 
-function gridToGeo(x: number, y: number): GeoPoint { return { lat: 1.22 + (y / 20) * .17, lon: 103.74 + (x / 20) * .28, name: 'Store pickup' }; }
-function geoToGrid(value: number, min: number, max: number): number { return Math.max(0, Math.min(20, Math.round(((value - min) / (max - min)) * 20))); }

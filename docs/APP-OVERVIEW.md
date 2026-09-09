@@ -9,8 +9,17 @@ For the agent internals see [AGENTS.md](AGENTS.md).
 
 A B2B2C autonomous delivery-dispatch demo. Merchants list products and take orders,
 customers shop and place orders, a 6-agent system routes and assigns a driver, drivers
-deliver, and a dispatcher (admin) watches the whole network on a live map. Everything
-runs on a 20×20 road grid with a traffic simulator.
+deliver, and a dispatcher (admin) watches the whole network on a live map.
+
+**Map & coordinates.** The UI is a real Singapore map (Leaflet + OpenStreetMap).
+Merchants, drivers and customers pick real addresses (Nominatim); drivers,
+pickups and drop-offs are plotted at their true lat/lon and **hover a pin to see
+its details**. Routes follow real roads (OSRM), with a deterministic grid-route
+fallback when OSRM is unreachable. Under the hood the routing/scoring engine
+still works in an abstract 20×20 grid — `server/src/engine/geo.ts` is the single
+projection between the two (`gridToGeo` / `geoToGrid`), so the agent decisions
+stay deterministic while the map stays real. A traffic simulator injects
+congestion and closures.
 
 **Stack:** Vite + vanilla-TypeScript SPA (`src/`) · Express 5 + TypeScript API (`server/src/`)
 · Postgres data layer (in-process PGlite locally, Supabase `pg` in production) · optional

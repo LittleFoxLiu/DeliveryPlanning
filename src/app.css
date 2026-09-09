@@ -48,6 +48,11 @@ code { background: #eef0f4; padding: 1px 5px; border-radius: 5px; font-size: .9e
 .geo-results small { color: var(--muted); }
 .geo-help { margin: 0; }
 .route-preview { padding: 9px 11px; background: #e0f2f1; color: #0f7a77; border-radius: 8px; }
+/* hover tooltip on map pins */
+.leaflet-tooltip.geo-tip { background: #1b2436; color: #fff; border: 0; border-radius: 8px; padding: 7px 10px;
+  font-size: 12px; line-height: 1.45; box-shadow: 0 8px 24px rgba(20,30,55,.28); }
+.leaflet-tooltip.geo-tip strong { font-size: 12.5px; }
+.leaflet-tooltip.geo-tip.leaflet-tooltip-top::before { border-top-color: #1b2436; }
 
 /* shell */
 .shell { min-height: 100vh; display: flex; flex-direction: column; }

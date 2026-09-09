@@ -2,6 +2,7 @@ import { q, q1, tx } from './db.js';
 import { id, nowIso } from './util.js';
 import { assertOrderTransition, assertDeliveryTransition, type OrderStatus, type DeliveryStatus } from './engine/stateMachine.js';
 import type { Segment } from './engine/routing.js';
+import { gridToGeo } from './engine/geo.js';
 
 const inList = (n: number) => Array.from({ length: n }, () => '?').join(', ');
 
@@ -74,8 +75,9 @@ export interface StoreRow { id: string; merchant_id: string; name: string; picku
 export const stores = {
   async create(input: { merchantId: string; name: string; pickupLat: number; pickupLng: number; address?: string | null; geoLat?: number | null; geoLng?: number | null }) {
     const sid = id('sto');
+    const g = input.geoLat == null || input.geoLng == null ? gridToGeo(input.pickupLat, input.pickupLng) : null;
     await q(`INSERT INTO stores (id, merchant_id, name, pickup_lat, pickup_lng, address, geo_lat, geo_lng) VALUES (?,?,?,?,?,?,?,?)`,
-      [sid, input.merchantId, input.name, input.pickupLat, input.pickupLng, input.address ?? null, input.geoLat ?? null, input.geoLng ?? null]);
+      [sid, input.merchantId, input.name, input.pickupLat, input.pickupLng, input.address ?? null, input.geoLat ?? g!.lat, input.geoLng ?? g!.lon]);
     return { id: sid, ...input };
   },
   byId(sid: string) { return q1<StoreRow>(`SELECT * FROM stores WHERE id = ?`, [sid]); },
@@ -137,7 +139,9 @@ export const drivers = {
       await q(`INSERT INTO drivers (id, name, vehicle_type, capacity, max_package_size) VALUES (?,?,?,?,?)`,
         [did, input.name, input.vehicleType, input.capacity, input.maxPackageSize]);
       await q(`INSERT INTO driver_status (driver_id, status, current_order_count) VALUES (?, ?, 0)`, [did, input.status ?? 'available']);
-      await q(`INSERT INTO driver_locations (driver_id, lat, lng, address, geo_lat, geo_lng) VALUES (?, ?, ?, ?, ?, ?)`, [did, input.lat, input.lng, input.address ?? null, input.geoLat ?? null, input.geoLng ?? null]);
+      const g = input.geoLat == null || input.geoLng == null ? gridToGeo(input.lat, input.lng) : null;
+      await q(`INSERT INTO driver_locations (driver_id, lat, lng, address, geo_lat, geo_lng) VALUES (?, ?, ?, ?, ?, ?)`,
+        [did, input.lat, input.lng, input.address ?? null, input.geoLat ?? g!.lat, input.geoLng ?? g!.lon]);
     });
     return { id: did };
   },
@@ -151,7 +155,12 @@ export const drivers = {
       [delta, nowIso(), did]);
   },
   async recordLocation(did: string, lat: number, lng: number, address?: string | null, geoLat?: number | null, geoLng?: number | null) {
-    await q(`INSERT INTO driver_locations (driver_id, lat, lng, address, geo_lat, geo_lng) VALUES (?, ?, ?, ?, ?, ?)`, [did, lat, lng, address ?? null, geoLat ?? null, geoLng ?? null]);
+    // Grid position is authoritative; if no real geo is supplied (e.g. the
+    // simulator moving a driver one cell) derive it from the grid so the map
+    // always has a coordinate to plot.
+    const g = geoLat == null || geoLng == null ? gridToGeo(lat, lng) : null;
+    await q(`INSERT INTO driver_locations (driver_id, lat, lng, address, geo_lat, geo_lng) VALUES (?, ?, ?, ?, ?, ?)`,
+      [did, lat, lng, address ?? null, geoLat ?? g!.lat, geoLng ?? g!.lon]);
   },
 };
 
@@ -170,12 +179,15 @@ export interface OrderItemInput { name: string; qty: number; productId?: string 
 export const orders = {
   async create(input: Omit<OrderRow, 'id' | 'status' | 'created_at' | 'ready_at'> & { items?: OrderItemInput[] }): Promise<OrderRow> {
     const oid = id('ord');
+    const dg = input.delivery_geo_lat == null || input.delivery_geo_lng == null
+      ? gridToGeo(input.delivery_lat, input.delivery_lng) : null;
     await tx(async () => {
       await q(`
         INSERT INTO orders (id, merchant_id, store_id, customer_id, pickup_lat, pickup_lng, delivery_lat, delivery_lng, delivery_address, delivery_geo_lat, delivery_geo_lng, status, priority, deadline_ts, package_size, volume, note)
         VALUES (?,?,?,?,?,?,?,?,?,?,?, 'created', ?,?,?,?,?)`,
         [oid, input.merchant_id, input.store_id, input.customer_id, input.pickup_lat, input.pickup_lng,
-          input.delivery_lat, input.delivery_lng, input.delivery_address ?? null, input.delivery_geo_lat ?? null, input.delivery_geo_lng ?? null,
+          input.delivery_lat, input.delivery_lng, input.delivery_address ?? null,
+          input.delivery_geo_lat ?? dg!.lat, input.delivery_geo_lng ?? dg!.lon,
           input.priority, input.deadline_ts, input.package_size, input.volume, input.note ?? null]);
       for (const item of input.items ?? []) {
         await q(`INSERT INTO order_items (order_id, product_id, name, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?)`,
