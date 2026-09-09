@@ -66,6 +66,14 @@ Tests always run against a private in-process Postgres regardless of
 Other scripts: `npm test` (Vitest), `npm run typecheck`, `npm run build`,
 `npm run seed` (reseed the DB).
 
+### Vercel deployment
+
+The Vercel deployment exposes the Express API through `api/[...path].ts`.
+Configure `DATABASE_URL` (a persistent Postgres/Supabase connection string) and
+`AUTH_SECRET` (at least 16 characters) in the Vercel project environment. On a
+new empty database the API initialises the schema and creates the demo accounts
+automatically; it does not reset an existing database.
+
 ---
 
 ## The demo (≈2 minutes)
