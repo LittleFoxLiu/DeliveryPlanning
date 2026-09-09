@@ -5,7 +5,7 @@ import { enableMapTooltips } from '../map';
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
 import type { Point, ProductDto } from '../types';
 import { mountLocationMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
-import { gridToGeo, geoToGrid } from '../geo';
+import { gridToGeo, geoToGrid, routeFromHere } from '../geo';
 
 interface Tracking {
   order: { id: string; status: string; priority: string; deadlineTs: string; pickup?: Point & { address?: string; lat?: number; lon?: number }; dropoff: Point & { address?: string; lat?: number; lon?: number }; items: { name: string; qty: number }[] };
@@ -232,10 +232,12 @@ function wire(el: HTMLElement): void {
         ? { lat: t.order.pickup.lat, lon: t.order.pickup.lon } : gridToGeo(t.order.pickup.x, t.order.pickup.y);
       points.push({ lat: pg.lat, lon: pg.lon, kind: 'Pickup', name: 'Merchant pickup' });
     }
-    if (t.delivery?.driverPositionGeo) points.push({ lat: t.delivery.driverPositionGeo.lat, lon: t.delivery.driverPositionGeo.lon, kind: 'Driver', name: 'Your driver' });
-    else if (t.delivery?.driverPosition) { const g = gridToGeo(t.delivery.driverPosition.x, t.delivery.driverPosition.y); points.push({ lat: g.lat, lon: g.lon, kind: 'Driver', name: 'Your driver' }); }
-    const path = [...(t.delivery?.route?.path.toPickup ?? []), ...(t.delivery?.route?.path.toDropoff ?? [])];
-    import('../geoMap').then(({ mountRouteMap }) => mountRouteMap(liveMap, points, path.length > 1 ? [path.map((p) => [p.y, p.x] as [number, number])] : []));
+    let driverGeo: { lat: number; lon: number } | null = null;
+    if (t.delivery?.driverPositionGeo) driverGeo = t.delivery.driverPositionGeo;
+    else if (t.delivery?.driverPosition) driverGeo = gridToGeo(t.delivery.driverPosition.x, t.delivery.driverPosition.y);
+    if (driverGeo) points.push({ lat: driverGeo.lat, lon: driverGeo.lon, kind: 'Driver', name: 'Your driver' });
+    const line = routeFromHere([...(t.delivery?.route?.path.toPickup ?? []), ...(t.delivery?.route?.path.toDropoff ?? [])], driverGeo);
+    import('../geoMap').then(({ mountRouteMap }) => mountRouteMap(liveMap, points, line.length > 1 ? [line] : []));
   }
   el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; repaint(el); }));
 

@@ -3,8 +3,7 @@ import { deliveries, orders, drivers, routes, roads, stores, type DeliveryRow } 
 import { emitAgentEvent } from './events.js';
 import { nowIso, conflict, badRequest } from './util.js';
 import { coordinator } from './agents/coordinator.js';
-import { geoToGrid } from './engine/geo.js';
-import type { Point } from './engine/routing.js';
+import { calculateRoute, type Point } from './engine/routing.js';
 
 type DriverAction = 'accept' | 'picked_up' | 'delivered';
 
@@ -58,51 +57,36 @@ export interface TickResult {
   monitoring: Awaited<ReturnType<typeof coordinator.runMonitoringCycle>>;
 }
 
-/** Simulator: advance every in-flight driver a few steps along their active
- *  route geometry (real OSRM lat/lon), auto-transitioning on arrival, then run
- *  one monitoring cycle. `monitor: false` skips the monitoring/remediation pass
- *  (used for the no-autonomy baseline in the evaluation centre). */
+/** Simulator: advance every in-flight driver a step or two along their
+ *  deterministic grid route (which respects traffic / closures), then run one
+ *  monitoring cycle. The map shows the projected real-world position;
+ *  `monitor: false` skips the monitoring/remediation pass. */
 export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<TickResult> {
   const moved: TickResult['moved'] = [];
 
   const active = (await deliveries.active()).filter((d) => ['assigned', 'en_route_pickup', 'picked_up', 'en_route_drop'].includes(d.status));
+  const segs = await roads.segments();
   for (const delivery of active) {
     if (!delivery.driver_id) continue;
     const route = await routes.activeForDelivery(delivery.id);
     if (!route) continue;
     const driver = await drivers.byId(delivery.driver_id);
-    if (!driver || driver.status === 'offline') continue;
+    if (!driver || driver.status === 'offline' || driver.lat == null) continue;
     const order = await orders.byId(delivery.order_id);
     if (!order) continue;
 
     const phasePickup = ['assigned', 'en_route_pickup'].includes(delivery.status);
-    // Route path nodes are real coordinates: { x: lon, y: lat }.
-    const path = ((route.path_json ?? {})[phasePickup ? 'toPickup' : 'toDropoff'] ?? []) as { x: number; y: number }[];
-    if (path.length < 1) continue;
+    const pos: Point = { x: driver.lat, y: driver.lng as number };
+    const target: Point = phasePickup
+      ? { x: order.pickup_lat, y: order.pickup_lng }
+      : { x: order.delivery_lat, y: order.delivery_lng };
 
-    const store = phasePickup ? await stores.byId(order.store_id) : null;
-    // where the driver currently is, in real coordinates
-    const cur = driver.geo_lat != null && driver.geo_lng != null
-      ? { lon: driver.geo_lng, lat: driver.geo_lat }
-      : { lon: path[0].x, lat: path[0].y };
-    // real waypoint at the end of this leg
-    const wp = phasePickup
-      ? { lon: store?.geo_lng ?? path[path.length - 1].x, lat: store?.geo_lat ?? path[path.length - 1].y }
-      : { lon: order.delivery_geo_lng ?? path[path.length - 1].x, lat: order.delivery_geo_lat ?? path[path.length - 1].y };
+    // Grid Dijkstra picks the route around any closures; move ~2 cells per tick.
+    const path = calculateRoute(pos, target, segs).path;
+    const atTarget = path.length <= 2 || (Math.abs(pos.x - target.x) + Math.abs(pos.y - target.y)) <= 1;
+    const next: Point = atTarget ? target : (path[Math.min(2, path.length - 1)] ?? target);
 
-    // nearest node on the remaining route, then advance ~1/10th of the leg
-    let idx = 0; let best = Infinity;
-    path.forEach((p, i) => { const d = (p.x - cur.lon) ** 2 + (p.y - cur.lat) ** 2; if (d <= best) { best = d; idx = i; } });
-    const step = Math.max(1, Math.ceil(path.length / 10));
-    let ni = idx + step;
-    const atTarget = ni >= path.length - 1;
-    const nextGeo = atTarget ? { lon: wp.lon, lat: wp.lat } : { lon: path[ni].x, lat: path[ni].y };
-
-    const grid = geoToGrid(nextGeo.lat, nextGeo.lon);
-    await drivers.recordLocation(delivery.driver_id, grid.x, grid.y, undefined, nextGeo.lat, nextGeo.lon);
-    const pos: Point = { x: driver.lat ?? grid.x, y: (driver.lng as number) ?? grid.y };
-    const next: Point = { x: grid.x, y: grid.y };
-    void ni;
+    await drivers.recordLocation(delivery.driver_id, next.x, next.y);
     const record: TickResult['moved'][number] = { deliveryId: delivery.id, driverId: delivery.driver_id, from: pos, to: next };
     if (atTarget && phasePickup) {
       try {
@@ -161,17 +145,23 @@ export function injectTraffic(input: {
       if (!delivery) throw badRequest('order has no active delivery');
       const route = await routes.activeForDelivery(delivery.id);
       if (!route) throw badRequest('delivery has no active route');
-      const paths = route.path_json ?? {};
       const driver = delivery.driver_id ? await drivers.byId(delivery.driver_id) : undefined;
-      const pos: Point = driver && driver.lat != null ? { x: driver.lat, y: driver.lng as number } : { x: route.origin_lat, y: route.origin_lng };
       const phasePickup = ['assigned', 'en_route_pickup'].includes(delivery.status);
-      const path = (phasePickup ? paths.toPickup : paths.toDropoff) ?? [];
-      let idx = 0; let bestD = Infinity;
-      path.forEach((p, i) => { const d = Math.hypot(p.x - pos.x, p.y - pos.y); if (d < bestD) { bestD = d; idx = i; } });
-      const a = path[Math.min(idx + 1, path.length - 2)];
-      const b = path[Math.min(idx + 2, path.length - 1)];
-      if (a && b && (a.x !== b.x || a.y !== b.y)) {
-        const rid = await findRoadId(a, b);
+      const target: Point = phasePickup
+        ? { x: order.pickup_lat, y: order.pickup_lng }
+        : { x: order.delivery_lat, y: order.delivery_lng };
+      const gridPos: Point = driver && driver.lat != null
+        ? { x: driver.lat, y: driver.lng as number }
+        : { x: route.origin_lat as number, y: route.origin_lng as number };
+
+      // Block a real road segment 1–2 cells ahead on the grid route the driver
+      // is actually following, so the closure is unavoidably on their path.
+      const segs = await roads.segments();
+      const path = calculateRoute(gridPos, target, segs).path;
+      const idx = 0;
+      for (let k = 0; k < path.length - 1 && segmentIds.length === 0; k++) {
+        if (path[k].x === path[k + 1].x && path[k].y === path[k + 1].y) continue;
+        const rid = await findRoadId(path[k], path[k + 1]);
         if (rid) segmentIds = [rid];
       }
       if (segmentIds.length === 0) throw badRequest('could not locate a blockable segment on the remaining route');

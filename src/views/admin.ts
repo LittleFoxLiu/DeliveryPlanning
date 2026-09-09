@@ -4,7 +4,7 @@ import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil } from '../ui';
 import { enableMapTooltips } from '../map';
 import { mountOverviewMap, searchNominatim } from '../geoMap';
-import { gridToGeo } from '../geo';
+import { gridToGeo, routeFromHere } from '../geo';
 import { renderAdminOps } from './adminOps';
 import { renderAdminEval } from './adminEval';
 
@@ -212,9 +212,10 @@ function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   const overviewMap = el.querySelector<HTMLElement>('#admin-overview-map');
   if (overviewMap) {
     const points: Array<{ lat: number; lon: number; name: string; kind: string; detail?: string }> = [];
+    const driverGeo = new Map<string, { lat: number; lon: number }>();
     ov.drivers.forEach((d) => {
       const g = d.geoLocation ?? (d.location ? gridToGeo(d.location.x, d.location.y) : null);
-      if (g) points.push({ lat: g.lat, lon: g.lon, name: d.name, kind: 'Driver', detail: `${d.status} · ${d.currentOrderCount}/${d.capacity}` });
+      if (g) { driverGeo.set(d.id, g); points.push({ lat: g.lat, lon: g.lon, name: d.name, kind: 'Driver', detail: `${d.status} · ${d.currentOrderCount}/${d.capacity}` }); }
     });
     const paths: [number, number][][] = [];
     ov.orders.forEach((o) => {
@@ -223,8 +224,10 @@ function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
       points.push({ lat: pg.lat, lon: pg.lon, name: o.storeName || 'Merchant pickup', kind: 'Pickup', detail: o.pickup.address || o.code });
       points.push({ lat: dg.lat, lon: dg.lon, name: o.customerName, kind: 'Drop-off', detail: o.dropoff.address || `${o.code} · ${o.status}` });
       const route = o.delivery?.route;
-      // route path nodes are real coordinates { x: lon, y: lat }
-      const path = route ? [...(route.path.toPickup ?? []), ...(route.path.toDropoff ?? [])].map((p) => [p.y, p.x] as [number, number]) : [];
+      // route path nodes are real coordinates { x: lon, y: lat } — redraw from
+      // the driver's live position so the line follows them as they move
+      const from = o.delivery?.driverId ? driverGeo.get(o.delivery.driverId) : null;
+      const path = route ? routeFromHere([...(route.path.toPickup ?? []), ...(route.path.toDropoff ?? [])], from) : [];
       if (path.length > 1) paths.push(path);
     });
     mountOverviewMap(overviewMap, points, paths);

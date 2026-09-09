@@ -24,13 +24,16 @@ async function gridFallbackRoute(from: GeoPoint, to: GeoPoint): Promise<RouteRes
     x: span.lonMin + (p.x / 20) * (span.lonMax - span.lonMin),
     y: span.latMin + (p.y / 20) * (span.latMax - span.latMin),
   });
-  // straight-line distance for the ETA so it is stable regardless of grid detours
   const km = Math.hypot((to.lat - from.lat) * KM_PER_DEG, (to.lon - from.lon) * KM_PER_DEG * Math.cos((from.lat * Math.PI) / 180));
-  const mins = Number(((km / 25) * 60).toFixed(1)); // ~25 km/h city average
+  // Use the grid Dijkstra time so the fallback stays traffic-aware (closures /
+  // congestion lengthen the ETA); fall back to a straight-line guess only when
+  // the grid route is unreachable.
+  const straight = Number(((km / 25) * 60).toFixed(1)); // ~25 km/h city average
+  const mins = r.reachable && Number.isFinite(r.etaMinutes) ? r.etaMinutes : straight;
   return {
     path: (r.path.length ? r.path : [{ x: a.x, y: a.y }, { x: b.x, y: b.y }]).map(toGeo),
     distanceKm: Number(km.toFixed(2)),
-    etaMinutes: mins, baselineMinutes: mins, trafficPenaltyMinutes: r.trafficPenaltyMinutes,
+    etaMinutes: mins, baselineMinutes: straight, trafficPenaltyMinutes: r.trafficPenaltyMinutes,
     reachable: r.reachable, blockedSegments: r.blockedSegments,
   };
 }

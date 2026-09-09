@@ -4,7 +4,7 @@ import { esc, toast, statusChip, fmtTime, minutesUntil } from '../ui';
 import { enableMapTooltips } from '../map';
 import type { Point } from '../types';
 import { mountLocationMap, mountRouteMap, type GeoPoint } from '../geoMap';
-import { gridToGeo, geoToGrid } from '../geo';
+import { gridToGeo, geoToGrid, routeFromHere } from '../geo';
 
 interface DriverDelivery {
   id: string; status: string; etaTs: string | null; estimatedDeliveryMinutes: number | null;
@@ -138,8 +138,8 @@ function wire(el: HTMLElement, active: DriverDelivery[], me: Me): void {
       const dg = d.dropoff.lat != null && d.dropoff.lon != null ? { lat: d.dropoff.lat, lon: d.dropoff.lon } : gridToGeo(d.dropoff.x, d.dropoff.y);
       points.push({ lat: pg.lat, lon: pg.lon, kind: 'Pickup', name: d.pickup.name || 'Merchant', detail: d.order.code });
       points.push({ lat: dg.lat, lon: dg.lon, kind: 'Drop-off', name: d.order.customerName, detail: d.order.code });
-      const path = [...(d.route?.path.toPickup ?? []), ...(d.route?.path.toDropoff ?? [])];
-      if (path.length > 1) paths.push(path.map((p) => [p.y, p.x]));
+      const line = routeFromHere([...(d.route?.path.toPickup ?? []), ...(d.route?.path.toDropoff ?? [])], me.geoLocation);
+      if (line.length > 1) paths.push(line);
     });
     mountRouteMap(routeMap, points, paths);
   }

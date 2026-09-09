@@ -1,12 +1,11 @@
-import { deliveries, orders, drivers, routes, stores, type DeliveryRow, type OrderRow } from '../repo.js';
+import { deliveries, orders, drivers, roads, routes, type DeliveryRow, type OrderRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
-import type { Point } from '../engine/routing.js';
-import { calculateGeoRoute, estimateGeoDelivery, type GeoPoint } from '../engine/geoRouting.js';
+import { calculateRoute, estimateDeliveryTime, type Point } from '../engine/routing.js';
 import { narrateRisk } from './llm.js';
 
 const NAME = 'MonitoringAgent';
 const DELAY_THRESHOLD_MIN = 3;
-const DEVIATION_THRESHOLD = 2.5; // grid units from the planned path
+const DEVIATION_THRESHOLD = 2.5; // grid units off the planned route
 
 export const monitoringTools = {
   get_driver_position: async (driverId: string) => {
@@ -15,14 +14,15 @@ export const monitoringTools = {
   },
   get_order_status: async (orderId: string) => (await orders.byId(orderId))?.status,
   get_current_route: (deliveryId: string) => routes.activeForDelivery(deliveryId),
-  detect_delay: (delivery: DeliveryRow, projectedTotalMin: number, order: OrderRow) => {
+  /** `projected` = grid ETA now, `baseline` = ideal free-flow grid ETA. The gap
+   *  is the traffic/detour penalty the driver is currently carrying. */
+  detect_delay: (delivery: DeliveryRow, projected: { totalMinutes: number; baselineMinutes: number }, order: OrderRow) => {
     const deadlineMs = Date.parse(order.deadline_ts);
-    const assignedMs = delivery.assigned_at ? Date.parse(delivery.assigned_at) : Date.now();
-    const projectedDoneMs = Date.now() + (Number.isFinite(projectedTotalMin) ? projectedTotalMin * 60_000 : 9e12);
-    const originalEta = delivery.estimated_delivery_minutes ?? projectedTotalMin;
-    const elapsedMin = (Date.now() - assignedMs) / 60_000;
-    const projectedFromStart = elapsedMin + projectedTotalMin;
-    const slipMin = Math.round(projectedFromStart - originalEta);
+    const projectedDoneMs = Date.now() + (Number.isFinite(projected.totalMinutes) ? projected.totalMinutes * 60_000 : 9e12);
+    const slipMin = Number.isFinite(projected.totalMinutes)
+      ? Math.round(projected.totalMinutes - projected.baselineMinutes)
+      : 9999;
+    void delivery;
     return {
       delayed: slipMin >= DELAY_THRESHOLD_MIN || projectedDoneMs > deadlineMs,
       slipMin,
@@ -31,7 +31,7 @@ export const monitoringTools = {
     };
   },
   detect_route_deviation: (pos: Point, path: Point[]) => {
-    if (!path.length) return { deviating: false, distance: 0 };
+    if (!path.length || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return { deviating: false, distance: 0 };
     let min = Infinity;
     for (const p of path) {
       const d = Math.hypot(p.x - pos.x, p.y - pos.y);
@@ -39,16 +39,15 @@ export const monitoringTools = {
     }
     return { deviating: min > DEVIATION_THRESHOLD, distance: Number(min.toFixed(2)) };
   },
-  estimate_new_eta: async (pos: Point, pickup: Point, dropoff: Point, phase: 'to_pickup' | 'to_dropoff', geo?: { driver: GeoPoint; pickup: GeoPoint; dropoff: GeoPoint }) => {
-    if (geo) {
-      if (phase === 'to_dropoff') {
-        const r = await calculateGeoRoute(geo.driver, geo.dropoff);
-        return { totalMinutes: r.etaMinutes, reachable: r.reachable };
-      }
-      const e = await estimateGeoDelivery(geo.driver, geo.pickup, geo.dropoff);
-      return { totalMinutes: e.totalMinutes, reachable: e.reachable };
+  /** Fresh grid estimate from the driver's current position — traffic-aware. */
+  estimate_new_eta: async (pos: Point, pickup: Point, dropoff: Point, phase: 'to_pickup' | 'to_dropoff', segs: import('../engine/routing.js').Segment[]) => {
+    if (phase === 'to_dropoff') {
+      const r = calculateRoute(pos, dropoff, segs);
+      return { totalMinutes: r.etaMinutes, baselineMinutes: r.baselineMinutes, reachable: r.reachable };
     }
-    return { totalMinutes: Infinity, reachable: false };
+    const e = estimateDeliveryTime(pos, pickup, dropoff, segs);
+    const baseline = e.toPickup.baselineMinutes + e.handlingMinutes + e.toDropoff.baselineMinutes;
+    return { totalMinutes: e.totalMinutes, baselineMinutes: baseline, reachable: e.reachable };
   },
   /** Raise a remediation request for the Coordinator to act on. The Monitoring
    *  Agent detects and recommends; it never mutates the assignment itself. */
@@ -114,22 +113,13 @@ export const monitoringAgent = {
 
       const pickup: Point = { x: order.pickup_lat, y: order.pickup_lng };
       const dropoff: Point = { x: order.delivery_lat, y: order.delivery_lng };
-      const store = await stores.byId(order.store_id);
-      const geo = driver.geo_lat != null && driver.geo_lng != null && store?.geo_lat != null && store.geo_lng != null
-        && order.delivery_geo_lat != null && order.delivery_geo_lng != null
-        ? {
-          driver: { lat: driver.geo_lat, lon: driver.geo_lng },
-          pickup: { lat: store.geo_lat, lon: store.geo_lng },
-          dropoff: { lat: order.delivery_geo_lat, lon: order.delivery_geo_lng },
-        }
-        : undefined;
-      const newEta = await monitoringTools.estimate_new_eta(pos, pickup, dropoff, phase, geo);
-      const delay = monitoringTools.detect_delay(delivery, newEta.totalMinutes, order);
+      const segs = await roads.segments();
+      const newEta = await monitoringTools.estimate_new_eta(pos, pickup, dropoff, phase, segs);
+      const delay = monitoringTools.detect_delay(delivery, newEta, order);
 
-      const route = await monitoringTools.get_current_route(delivery.id);
-      const rp = route?.path_json ?? {};
-      const path: Point[] = [...(rp.toPickup ?? []), ...(rp.toDropoff ?? [])];
-      const deviation = monitoringTools.detect_route_deviation(pos, path);
+      // deviation: driver's grid position vs the grid route it should be on
+      const gridPath = calculateRoute(pos, phase === 'to_pickup' ? pickup : dropoff, segs).path;
+      const deviation = monitoringTools.detect_route_deviation(pos, gridPath);
 
       if (!newEta.reachable) { issues.push('route_blocked'); trigger = 'reroute'; }
       if (delay.delayed) { issues.push(delay.missesDeadline ? 'deadline_at_risk' : 'delayed'); if (trigger === 'none') trigger = 'reroute'; }

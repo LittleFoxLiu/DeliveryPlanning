@@ -4,6 +4,7 @@ import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../mai
 import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
 import { productGrid, cartSummary, cartCount, cartItems, wireCart, type Cart } from './shop';
 import { mountRouteMap, searchNominatim, type GeoPoint } from '../geoMap';
+import { routeFromHere } from '../geo';
 
 interface MerchantOrders { orders: OrderDto[] }
 interface OrderDetail {
@@ -166,11 +167,12 @@ function wire(el: HTMLElement, detail: OrderDetail | null = null): void {
   const routeMap = el.querySelector<HTMLElement>('#merchant-route-map');
   if (routeMap && detail) {
     const points: Array<GeoPoint & { kind: string; name: string; detail?: string }> = [];
-    if (detail.assignedDriver?.geoLocation) points.push({ ...detail.assignedDriver.geoLocation, kind: 'Driver', name: detail.assignedDriver.name, detail: detail.assignedDriver.status });
+    const driverGeo = detail.assignedDriver?.geoLocation ?? null;
+    if (driverGeo) points.push({ ...driverGeo, kind: 'Driver', name: detail.assignedDriver!.name, detail: detail.assignedDriver!.status });
     if (detail.order.pickup.lat != null && detail.order.pickup.lon != null) points.push({ lat: detail.order.pickup.lat, lon: detail.order.pickup.lon, kind: 'Pickup', name: detail.order.storeName || 'Merchant pickup', detail: detail.order.pickup.address || undefined });
     if (detail.order.dropoff.lat != null && detail.order.dropoff.lon != null) points.push({ lat: detail.order.dropoff.lat, lon: detail.order.dropoff.lon, kind: 'Drop-off', name: detail.order.customerName, detail: detail.order.dropoff.address || undefined });
-    const path = [...(detail.route?.path.toPickup ?? []), ...(detail.route?.path.toDropoff ?? [])].map((p) => [p.y, p.x] as [number, number]);
-    mountRouteMap(routeMap, points, path.length > 1 ? [path] : []);
+    const line = routeFromHere([...(detail.route?.path.toPickup ?? []), ...(detail.route?.path.toDropoff ?? [])], driverGeo);
+    mountRouteMap(routeMap, points, line.length > 1 ? [line] : []);
   }
   const repaint = () => renderMerchant(el, null, currentPage);
   const address = el.querySelector<HTMLInputElement>('[data-merchant-address]');
