@@ -3,6 +3,8 @@ import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil } from '../ui';
 import { renderMap, routeToPath, enableMapTooltips, type MapMarker, type MapPath } from '../map';
+import { renderAdminOps } from './adminOps';
+import { renderAdminEval } from './adminEval';
 
 interface Overview {
   orders: OrderDto[];
@@ -30,6 +32,8 @@ let created: { kind: string; name: string; email: string; password: string }[] =
 let currentPage = 'overview';
 
 export async function renderAdmin(el: HTMLElement, _user: unknown, page = 'overview'): Promise<void> {
+  if (page === 'ops') return renderAdminOps(el);
+  if (page === 'evaluation') return renderAdminEval(el);
   resetSig('admin');
   currentPage = page;
   if (!grid.roads.length) { try { grid = await get('/meta/grid'); } catch { /* retry next poll */ } }
@@ -174,14 +178,16 @@ function orderRow(o: OrderDto, ov: Overview): string {
       <td>${asg ? `<button class="btn sm" data-toggle="${esc(o.id)}">${isOpen ? 'Hide' : 'Why?'}</button>` : ''}</td>
     </tr>`;
   if (!isOpen || !asg) return rows;
-  const r = asg.reasoning;
-  const contrib = (r as { contributions?: Record<string, number> }).contributions;
+  const r = asg.reasoning as typeof asg.reasoning & { contributions?: Record<string, number>; runId?: string; negotiation?: { proposals: number; critiques: number; revisions: number } };
+  const contrib = r.contributions;
+  const neg = r.negotiation;
   return rows + `
     <tr><td colspan="8" style="background:#fbfbfa">
       <strong>${esc(r.rationale)}</strong>
       <ul class="reason-list">${r.explanation.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
       ${contrib ? `<p class="muted">Score breakdown: ${Object.entries(contrib).map(([k, v]) => `${esc(k)} ${v}`).join(' · ')} = <b>${asg.score}</b></p>` : ''}
       ${r.rejected.length ? `<p class="muted">Not eligible: ${r.rejected.map((x) => `${esc(String(x.driverId))} (${x.disqualifiers.join(', ')})`).join('; ')}</p>` : ''}
+      ${neg ? `<p class="muted">Agent negotiation: ${neg.proposals} proposal(s), ${neg.critiques} critique(s), ${neg.revisions} revision(s). <a href="#/admin/ops">Open full decision trace →</a></p>` : ''}
     </td></tr>`;
 }
 

@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS agent_events (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ts timestamptz NOT NULL DEFAULT now(),
   cycle_id text,
+  run_id text,
   agent text NOT NULL,
   event_type text NOT NULL,
   order_id text,
@@ -200,16 +201,55 @@ CREATE TABLE IF NOT EXISTS agent_events (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_events_order ON agent_events(order_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_events_id ON agent_events(id DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(run_id, id);
+
+-- Autonomous planning runs: the append-only shared state for one reasoning loop
+-- (dispatch or remediation). state_json holds proposals / critiques / revisions /
+-- policy checks / decision / execution — everything a judge can inspect.
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id text PRIMARY KEY,
+  correlation_id text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('dispatch','remediation','whatif','evaluation')),
+  order_id text,
+  delivery_id text,
+  status text NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running','executed','escalated','aborted','no_action','simulated')),
+  risk_level text CHECK (risk_level IN ('low','medium','high')),
+  state_json jsonb NOT NULL,
+  started_at timestamptz NOT NULL DEFAULT now(),
+  ended_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_order ON agent_runs(order_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at DESC);
+
+-- Human-in-the-loop escalations raised by the Coordinator for HIGH-risk actions.
+CREATE TABLE IF NOT EXISTS agent_escalations (
+  id text PRIMARY KEY,
+  run_id text NOT NULL REFERENCES agent_runs(id),
+  order_id text,
+  delivery_id text,
+  reason text NOT NULL,
+  proposal_json jsonb NOT NULL,
+  risk_json jsonb NOT NULL,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','expired')),
+  resolved_by text,
+  resolution_note text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_agent_escalations_status ON agent_escalations(status, created_at DESC);
 
 -- Additive migrations (safe to re-run against an existing database).
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS product_id text REFERENCES products(id);
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_price_cents integer NOT NULL DEFAULT 0;
+ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS run_id text;
 `;
 
 /** Tables in dependency order (parents first) — used for TRUNCATE in tests. */
 export const TABLES = [
   'join_requests', 'merchant_admins', 'admin_invites',
-  'agent_events', 'assignments', 'routes', 'deliveries', 'order_items', 'orders', 'products',
+  'agent_escalations', 'agent_runs', 'agent_events',
+  'assignments', 'routes', 'deliveries', 'order_items', 'orders', 'products',
   'driver_locations', 'driver_status', 'drivers', 'customers', 'stores', 'merchants',
   'road_segments', 'traffic_conditions', 'users',
 ];

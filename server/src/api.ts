@@ -7,14 +7,21 @@ import { badRequest, forbidden, notFound, conflict, HttpError } from './util.js'
 import { asObject, str, enumVal, int, coord, futureTs, idParam } from './validation.js';
 import {
   users, merchants, stores, customers, drivers, orders, deliveries, roads, traffic, memberships, products,
-  type OrderItemInput, type ProductRow,
+  type OrderItemInput, type ProductRow, type UserRow,
 } from './repo.js';
 import { listEvents, bus } from './events.js';
 import { coordinator } from './agents/coordinator.js';
 import { driverProgress, simulateTick, injectTraffic } from './services.js';
 import {
   orderView, deliveryView, activeRouteView, driverAdminView, assignmentReasoningView, orderTrackingView,
+  runTraceView, runSummaryView, publicRunView,
 } from './dto.js';
+import {
+  listRuns, getRun, latestRunForOrder, listEscalations, getEscalation, resolveEscalation,
+} from './agents/runStore.js';
+import { listTools } from './agents/toolRegistry.js';
+import { whatIfDriverOffline, whatIfRoadClosure } from './agents/whatif.js';
+import { runEvaluation, getLastEvalReport, evalRunning } from './evaluation/index.js';
 
 export const api = Router();
 
@@ -117,10 +124,10 @@ api.get('/auth/google/callback', async (req, res) => {
     if (!profileRes.ok) return fail('Could not read Google account');
     const profile = await profileRes.json() as { email?: string; email_verified?: boolean; name?: string };
     if (!profile.email || profile.email_verified !== true) return fail('A verified Google email is required');
-    let row = await users.byEmail(profile.email);
-    let isNew = false;
+    const existing = await users.byEmail(profile.email);
+    let row: UserRow | undefined = existing;
+    const isNew = !existing;
     if (!row) {
-      isNew = true;
       const p = hashPassword(randomBytes(32).toString('hex'));
       const customer = await customers.create(profile.name || profile.email.split('@')[0]);
       row = await users.create({ email: profile.email, passwordHash: p.hash, passwordSalt: p.salt, role: 'customer', name: profile.name || profile.email, refId: customer.id });
@@ -332,6 +339,7 @@ api.get('/merchant/orders/:id', ...merchantOnly, h(async (req, res) => {
       : null,
     route: delivery ? await activeRouteView(delivery.id) : null,
     events: await listEvents({ orderId: order.id, limit: 60 }),
+    run: await latestRunForOrder(order.id).then((r) => (r ? publicRunView(r) : null)),
   });
 }));
 
@@ -567,14 +575,71 @@ api.get('/admin/orders/:id', ...adminOnly, h(async (req, res) => {
   const order = await orders.byId(idParam(req.params.id, 'order id'));
   if (!order) throw notFound('Order not found');
   const delivery = await deliveries.byOrderId(order.id);
+  const run = await latestRunForOrder(order.id);
   res.json({
     order: await orderView(order),
     delivery: delivery ? deliveryView(delivery) : null,
     route: delivery ? await activeRouteView(delivery.id) : null,
     assignments: await assignmentReasoningView(order.id),
     events: await listEvents({ orderId: order.id, limit: 200 }),
+    run: run ? runTraceView(run) : null,
   });
 }));
+
+/* --------------------------------------------------- autonomous operations */
+api.get('/admin/runs', ...adminOnly, h(async (req, res) => {
+  const kind = req.query.kind === 'dispatch' || req.query.kind === 'remediation' ? req.query.kind : undefined;
+  const runs = await listRuns({ limit: 60, kind });
+  res.json({ runs: runs.map(runSummaryView) });
+}));
+
+api.get('/admin/runs/:id', ...adminOnly, h(async (req, res) => {
+  const run = await getRun(idParam(req.params.id, 'run id'));
+  if (!run) throw notFound('Run not found');
+  res.json({ run: runTraceView(run), events: await listEvents({ runId: run.id, limit: 200 }) });
+}));
+
+api.get('/admin/escalations', ...adminOnly, h(async (req, res) => {
+  const status = ['pending', 'approved', 'rejected'].includes(String(req.query.status)) ? req.query.status as 'pending' : undefined;
+  res.json({ escalations: await listEscalations(status) });
+}));
+
+api.post('/admin/escalations/:id', ...adminOnly, h(async (req, res) => {
+  const b = asObject(req.body);
+  const decision = enumVal(b, 'decision', ['approved', 'rejected'] as const);
+  const note = str(b, 'note', { optional: true, max: 400 });
+  const esc = await getEscalation(idParam(req.params.id, 'escalation id'));
+  if (!esc) throw notFound('Escalation not found');
+  if (esc.status !== 'pending') throw conflict(`Escalation already ${esc.status}`);
+  const resolved = await resolveEscalation(esc.id, decision, req.user!.name, note || decision);
+  if (!resolved) throw conflict('Escalation could not be resolved');
+
+  let outcome: unknown = null;
+  if (decision === 'approved' && esc.orderId) {
+    const run = await getRun(esc.runId);
+    outcome = await coordinator.executeApprovedEscalation(esc, run, req.user!.name);
+  }
+  res.json({ escalation: resolved, outcome });
+}));
+
+api.post('/admin/eval/run', ...adminOnly, h(async (_req, res) => {
+  res.json({ report: await runEvaluation() });
+}));
+api.get('/admin/eval/results', ...adminOnly, h(async (_req, res) => {
+  res.json({ report: getLastEvalReport(), running: evalRunning() });
+}));
+
+api.post('/admin/whatif', ...adminOnly, h(async (req, res) => {
+  const b = asObject(req.body);
+  const kind = enumVal(b, 'kind', ['driver_offline', 'road_close'] as const);
+  if (kind === 'driver_offline') {
+    res.json({ result: await whatIfDriverOffline(idParam(b.driverId, 'driver id')) });
+  } else {
+    res.json({ result: await whatIfRoadClosure(idParam(b.orderId, 'order id')) });
+  }
+}));
+
+api.get('/admin/tools', ...adminOnly, h(async (_req, res) => res.json({ tools: listTools() })));
 
 api.get('/admin/drivers', ...adminOnly, h(async (_req, res) => res.json({ drivers: (await drivers.all()).map(driverAdminView) })));
 

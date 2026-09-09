@@ -169,3 +169,19 @@ details.raw pre { background: #0f1729; color: #cfe0ff; padding: 12px; border-rad
 .cart-line { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .cart-total { display: flex; justify-content: space-between; font-weight: 800; padding-top: 10px; font-size: 15px; }
 .cart-empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+
+/* agent decision trace */
+ol.trace { list-style: none; margin: 8px 0 0; padding: 0; max-height: 520px; overflow-y: auto; }
+ol.trace li { padding: 8px 0 8px 12px; border-left: 2px solid var(--line); margin-left: 4px; position: relative; }
+ol.trace li::before { content: ''; position: absolute; left: -5px; top: 12px; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+ol.trace li.trace-proposal::before { background: var(--accent); }
+ol.trace li.trace-critique::before { background: var(--amber); }
+ol.trace li.trace-revision::before { background: var(--blue); }
+ol.trace li.trace-decision::before, ol.trace li.trace-risk::before { background: var(--teal); }
+ol.trace li.trace-execution::before { background: var(--green); }
+ol.trace li.trace-tool { opacity: .72; }
+.trace-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.trace-head time { color: var(--muted); margin-left: auto; font-size: 11px; }
+.trace-detail { font-size: 13px; margin-top: 2px; }
+.trace-evidence { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; font-size: 11px; color: var(--muted); }
+.trace-evidence b { color: var(--ink); }

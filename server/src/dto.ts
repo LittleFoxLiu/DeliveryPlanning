@@ -3,6 +3,8 @@ import {
   type OrderRow, type DeliveryRow, type DriverFull,
 } from './repo.js';
 import { listEvents } from './events.js';
+import type { PlanningRun } from './agents/protocol.js';
+import { latestRunForOrder } from './agents/runStore.js';
 
 export async function orderView(o: OrderRow) {
   const [items, customer, store] = await Promise.all([
@@ -113,7 +115,9 @@ export async function assignmentReasoningView(orderId: string) {
 export async function orderTrackingView(o: OrderRow) {
   const delivery = await deliveries.byOrderId(o.id);
   const driver = delivery?.driver_id ? await drivers.byId(delivery.driver_id) : undefined;
-  const [items, events] = await Promise.all([orders.items(o.id), listEvents({ orderId: o.id, limit: 40 })]);
+  const [items, events, run] = await Promise.all([
+    orders.items(o.id), listEvents({ orderId: o.id, limit: 40 }), latestRunForOrder(o.id),
+  ]);
   return {
     order: {
       id: o.id, status: o.status, priority: o.priority, deadlineTs: o.deadline_ts,
@@ -134,5 +138,137 @@ export async function orderTrackingView(o: OrderRow) {
     events: events
       .filter((e) => e.eventType !== 'candidates_evaluated')
       .map((e) => ({ ts: e.ts, agent: e.agent, message: e.message })),
+    run: run ? publicRunView(run) : null,
+  };
+}
+
+/* --------------------------------------------------- autonomous run traces */
+
+export interface RunTraceEntry {
+  ts: string;
+  phase: 'tool' | 'proposal' | 'critique' | 'revision' | 'decision' | 'execution' | 'risk';
+  agent: string;
+  label: string;
+  detail: string;
+  evidence?: { label: string; value: string | number | boolean }[];
+}
+
+/** Full, judge-facing decision trace for one planning run. Structured, never
+ *  hidden chain-of-thought — just typed messages + the evidence behind them. */
+export function runTraceView(run: PlanningRun) {
+  const entries: RunTraceEntry[] = [];
+
+  for (const t of run.toolCalls) {
+    entries.push({
+      ts: t.ts, phase: 'tool', agent: t.agent,
+      label: `${t.tool} (${t.access})`,
+      detail: t.ok ? `→ ${t.outputSummary}` : `✗ ${t.error ?? 'failed'}`,
+    });
+  }
+  for (const p of run.proposals) {
+    const isRevision = run.revisions.some((r) => r.newProposal.id === p.id);
+    entries.push({
+      ts: p.ts, phase: isRevision ? 'revision' : 'proposal', agent: p.agent,
+      label: isRevision ? `REVISED → ${p.action}` : `PROPOSED ${p.action}`,
+      detail: p.summary,
+      evidence: p.evidence.map((e) => ({ label: e.label, value: e.value })),
+    });
+  }
+  for (const c of run.critiques) {
+    entries.push({
+      ts: c.ts, phase: 'critique', agent: c.agent,
+      label: c.supported ? 'SUPPORTED' : 'OBJECTED',
+      detail: c.supported
+        ? (c.evidence[0] ? `${c.evidence[0].label}: ${c.evidence[0].value}` : 'proposal upheld')
+        : c.objections.join('; ') + (c.alternative ? ` → suggests ${c.alternative.target ?? c.alternative.action}` : ''),
+      evidence: c.evidence.map((e) => ({ label: e.label, value: e.value })),
+    });
+  }
+  if (run.riskAssessment) {
+    entries.push({
+      ts: run.decision?.ts ?? run.startedAt, phase: 'risk', agent: 'Coordinator',
+      label: `RISK ${run.riskAssessment.level.toUpperCase()}`,
+      detail: run.riskAssessment.reasons.join(' '),
+    });
+  }
+  if (run.decision) {
+    entries.push({
+      ts: run.decision.ts, phase: 'decision', agent: 'Coordinator',
+      label: `DECISION — ${run.decision.mode}`,
+      detail: run.decision.explanation,
+      evidence: run.decision.policyChecks.map((c) => ({ label: c.name, value: c.passed ? `pass (${c.detail})` : `FAIL (${c.detail})` })),
+    });
+  }
+  if (run.execution) {
+    entries.push({
+      ts: run.execution.ts, phase: 'execution', agent: 'Coordinator',
+      label: run.execution.ok ? 'EXECUTED' : 'EXECUTION BLOCKED',
+      detail: run.execution.detail + (run.execution.etaMinutes != null ? ` — ETA ${Math.round(run.execution.etaMinutes)} min` : ''),
+    });
+  }
+
+  entries.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+
+  return {
+    id: run.id,
+    kind: run.kind,
+    status: run.status,
+    orderId: run.orderId,
+    deliveryId: run.deliveryId,
+    orderCode: run.context.orderCode ?? null,
+    trigger: run.context.trigger,
+    risk: run.riskAssessment,
+    decision: run.decision ? {
+      mode: run.decision.mode, action: run.decision.action, target: run.decision.target,
+      explanation: run.decision.explanation, policyChecks: run.decision.policyChecks,
+    } : null,
+    execution: run.execution,
+    escalationId: run.escalationId,
+    counts: {
+      toolCalls: run.toolCalls.length,
+      toolErrors: run.toolCalls.filter((t) => !t.ok).length,
+      proposals: run.proposals.length,
+      critiques: run.critiques.length,
+      revisions: run.revisions.length,
+    },
+    startedAt: run.startedAt,
+    endedAt: run.endedAt,
+    timeline: entries,
+  };
+}
+
+export function runSummaryView(run: PlanningRun) {
+  return {
+    id: run.id,
+    kind: run.kind,
+    status: run.status,
+    orderCode: run.context.orderCode ?? null,
+    orderId: run.orderId,
+    trigger: run.context.trigger,
+    risk: run.riskAssessment?.level ?? null,
+    mode: run.decision?.mode ?? null,
+    action: run.decision?.action ?? null,
+    escalationId: run.escalationId,
+    counts: {
+      toolCalls: run.toolCalls.length,
+      proposals: run.proposals.length,
+      critiques: run.critiques.length,
+      revisions: run.revisions.length,
+    },
+    startedAt: run.startedAt,
+    endedAt: run.endedAt,
+  };
+}
+
+/** Trimmed, customer/merchant-safe view — the story without internal gates. */
+export function publicRunView(run: PlanningRun) {
+  const full = runTraceView(run);
+  return {
+    id: full.id,
+    status: full.status,
+    decisionMode: full.decision?.mode ?? null,
+    timeline: full.timeline
+      .filter((e) => e.phase !== 'tool' && e.phase !== 'risk')
+      .map((e) => ({ ts: e.ts, agent: e.agent, label: e.label, detail: e.detail })),
   };
 }

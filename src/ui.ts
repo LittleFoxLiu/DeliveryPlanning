@@ -121,6 +121,37 @@ export function agentBadge(agent: string): string {
   return `<span class="agent-badge" style="--c:${AGENT_COLOR[agent] || '#98a2b3'}">${esc(agent)}</span>`;
 }
 
+export interface PublicRun {
+  id: string; status: string; decisionMode: string | null;
+  timeline: { ts: string; agent: string; label: string; detail: string }[];
+}
+
+const MODE_LABEL: Record<string, string> = {
+  auto: 'Decided autonomously', auto_policy: 'Decided autonomously (policy-checked)',
+  escalated: 'Escalated to a human dispatcher', blocked: 'Held for review',
+};
+
+/** Compact agent-decision summary for customer / merchant order views. */
+export function agentDecisionCard(run: PublicRun | null | undefined): string {
+  if (!run) return '';
+  const mode = run.decisionMode ? MODE_LABEL[run.decisionMode] ?? run.decisionMode : null;
+  return `<div class="card">
+    <div class="card-head"><h2>How the agents decided</h2>${mode ? `<span class="chip ${run.decisionMode?.startsWith('auto') ? 'green' : 'orange'}">${esc(mode)}</span>` : ''}</div>
+    <ol class="trace">${run.timeline.map((e) => `<li class="trace-${classifyPhase(e.label)}">
+      <div class="trace-head">${agentBadge(e.agent)} <strong>${esc(e.label)}</strong> <time>${relTime(e.ts)}</time></div>
+      <div class="trace-detail">${esc(e.detail)}</div>
+    </li>`).join('')}</ol>
+  </div>`;
+}
+function classifyPhase(label: string): string {
+  if (label.startsWith('PROPOSED')) return 'proposal';
+  if (label.startsWith('REVISED')) return 'revision';
+  if (label === 'OBJECTED' || label === 'SUPPORTED') return 'critique';
+  if (label.startsWith('DECISION')) return 'decision';
+  if (label.startsWith('EXECUTED') || label.startsWith('EXECUTION')) return 'execution';
+  return 'tool';
+}
+
 export function eventFeed(events: { agent: string; message: string; ts: string }[]): string {
   if (!events.length) return `<p class="muted">No agent activity yet.</p>`;
   return `<ul class="event-feed">${events.slice().reverse().map((e) => `

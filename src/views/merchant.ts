@@ -1,7 +1,7 @@
 import type { OrderDto, ProductDto } from '../types';
 import { get, post, patch, del, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../main';
-import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money } from '../ui';
+import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
 import { productGrid, cartSummary, cartCount, cartItems, wireCart, type Cart } from './shop';
 
 interface MerchantOrders { orders: OrderDto[] }
@@ -10,6 +10,7 @@ interface OrderDetail {
   delivery: OrderDto['delivery'];
   assignedDriver: { name: string; vehicleType: string; status: string; location: { x: number; y: number } | null } | null;
   events: { agent: string; message: string; ts: string }[];
+  run?: PublicRun | null;
 }
 
 let selected: string | null = null;
@@ -130,7 +131,8 @@ function detailBody(d: OrderDetail): string {
       <dt>ETA</dt><dd>${d.delivery?.etaTs ? `${fmtTime(d.delivery.etaTs)}${mins !== null ? ` (${mins}m)` : ''}` : '—'}</dd>
     </dl>
     <h3 style="margin-top:16px;font-size:13px">Agent trail</h3>
-    ${eventFeed(d.events)}`;
+    ${eventFeed(d.events)}
+    ${agentDecisionCard(d.run)}`;
 }
 
 function newOrderCard(): string {
@@ -173,6 +175,7 @@ function wire(el: HTMLElement): void {
       const d = res.dispatch;
       if (d.status === 'assigned' && d.decision) toast(`Assigned to a driver (score ${d.decision.score})`);
       else if (d.status === 'reused') toast('Already assigned to a driver');
+      else if (d.status === 'escalated') toast('Escalated to a dispatcher for approval — no safe autonomous option', 'error');
       else if (d.status === 'no_driver') toast(`No driver available — ${d.decision?.rationale || 'try again shortly'}`, 'error');
       else if (d.status === 'invalid') toast(`Cannot dispatch: ${(d.issues || []).join(', ') || 'order invalid'}`, 'error');
       else toast(`Dispatch: ${d.status}`);

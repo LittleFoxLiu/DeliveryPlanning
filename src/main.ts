@@ -155,7 +155,7 @@ function onboardingView(): void {
   app.innerHTML = `<div class="auth-screen"><div class="auth-card"><div class="brand"><span class="dot"></span><b>Set up your workspace</b></div><p class="auth-sub">Choose how you will use Delivery Planner.</p><form id="onboarding-form"><label>Account type<select name="role"><option value="customer">Customer</option><option value="merchant">Merchant</option><option value="driver">Driver</option><option value="admin">Admin</option></select></label><div id="role-fields"></div><button class="btn primary" type="submit">Continue</button></form></div></div>`;
   const form = app.querySelector<HTMLFormElement>('#onboarding-form')!; const fields = app.querySelector('#role-fields')!;
   const draw = () => { const role = (form.elements.namedItem('role') as HTMLSelectElement).value; fields.innerHTML = role === 'merchant' ? '<label>Business name<input name="businessName" required></label><label>Store name<input name="storeName" required></label><label>Store X<input name="storeLat" type="number" min="0" max="20" value="10" required></label><label>Store Y<input name="storeLng" type="number" min="0" max="20" value="10" required></label>' : role === 'driver' ? '<label>Vehicle<select name="vehicleType"><option>car</option><option>bike</option><option>van</option><option>truck</option></select></label><label>Capacity<input name="capacity" type="number" min="1" max="20" value="4" required></label><label>Starting X<input name="lat" type="number" min="0" max="20" value="10" required></label><label>Starting Y<input name="lng" type="number" min="0" max="20" value="10" required></label>' : '<p class="muted">You can join organizations later from your workspace.</p>'; };
-  form.elements.namedItem('role')!.addEventListener('change', draw); draw();
+  (form.elements.namedItem('role') as HTMLSelectElement).addEventListener('change', draw); draw();
   form.addEventListener('submit', async (e) => { e.preventDefault(); const fd = new FormData(form); const body: Record<string, unknown> = {}; fd.forEach((v, k) => { body[k] = v; }); body.capacity = Number(body.capacity); ['lat','lng','storeLat','storeLng'].forEach((k) => { if (body[k] !== undefined) body[k] = Number(body[k]); }); try { const r = await post<{ token: string; user: User }>('/onboarding/role', body); setSession(r.token, r.user); route(); } catch (err) { toast(err instanceof ApiError ? err.message : 'Setup failed', 'error'); } });
 }
 
@@ -174,7 +174,14 @@ export const NAV: Record<string, { id: string; label: string }[]> = {
   customer: [{ id: 'order', label: 'Order' }, { id: 'orders', label: 'My orders' }],
   merchant: [{ id: 'orders', label: 'Orders' }, { id: 'new', label: 'New order' }, { id: 'catalogue', label: 'Catalogue' }, { id: 'account', label: 'Account' }],
   driver: [{ id: 'deliveries', label: 'Deliveries' }, { id: 'account', label: 'Account' }],
-  admin: [{ id: 'overview', label: 'Overview' }, { id: 'orders', label: 'Orders' }, { id: 'fleet', label: 'Fleet' }, { id: 'network', label: 'Network' }],
+  admin: [
+    { id: 'overview', label: 'Overview' },
+    { id: 'ops', label: 'Autonomous Ops' },
+    { id: 'orders', label: 'Orders' },
+    { id: 'fleet', label: 'Fleet' },
+    { id: 'evaluation', label: 'Evaluation' },
+    { id: 'network', label: 'Network' },
+  ],
 };
 
 function currentPage(role: string): string {

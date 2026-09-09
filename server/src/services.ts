@@ -57,8 +57,10 @@ export interface TickResult {
 }
 
 /** Simulator: advance every in-flight driver one grid step along their active
- *  route, auto-transitioning on arrival, then run one monitoring cycle. */
-export async function simulateTick(): Promise<TickResult> {
+ *  route, auto-transitioning on arrival, then run one monitoring cycle.
+ *  `monitor: false` skips the monitoring/remediation pass (used for the
+ *  no-autonomy baseline in the evaluation centre). */
+export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<TickResult> {
   const moved: TickResult['moved'] = [];
 
   const active = (await deliveries.active()).filter((d) => ['assigned', 'en_route_pickup', 'picked_up', 'en_route_drop'].includes(d.status));
@@ -109,7 +111,9 @@ export async function simulateTick(): Promise<TickResult> {
     moved.push(record);
   }
 
-  const monitoring = await coordinator.runMonitoringCycle();
+  const monitoring = opts.monitor === false
+    ? { cycleId: '', findings: [], actions: [] }
+    : await coordinator.runMonitoringCycle();
   return { moved, monitoring };
 }
 

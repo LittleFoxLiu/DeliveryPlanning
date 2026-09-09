@@ -1,6 +1,6 @@
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../main';
-import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money } from '../ui';
+import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
 import { renderMap, enableMapTooltips, type MapMarker } from '../map';
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
 import type { RoadSeg, Point, ProductDto } from '../types';
@@ -13,6 +13,7 @@ interface Tracking {
     driverPosition: Point | null;
   } | null;
   events: { agent: string; message: string; ts: string }[];
+  run?: PublicRun | null;
 }
 interface Merchant { id: string; name: string; stores: { id: string; name: string; pickup?: Point }[] }
 
@@ -83,6 +84,7 @@ function view(orders: { id: string; status: string }[], t: Tracking | null): str
           <div class="pill-row">${orders.map((o) => `<button class="chip-btn" style="width:auto" data-pick="${esc(o.id)}">#${esc(o.id.replace(/^ord_/, '').slice(-6).toUpperCase())} ${customerChip(o.status)}</button>`).join('')}</div>
         </div>` : ''}
         ${t ? trackingCard(t) : ''}
+        ${t ? agentDecisionCard(t.run) : ''}
       </div>
       <div>
         ${t ? `<div class="card"><div class="card-head"><h2>Live map</h2></div>${mapFor(t)}</div>` : ''}
