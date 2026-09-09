@@ -74,6 +74,10 @@ Configure `DATABASE_URL` (a persistent Postgres/Supabase connection string) and
 new empty database the API initialises the schema and creates the demo accounts
 automatically; it does not reset an existing database.
 
+After redeploying, verify the API directly at `/api/health`. It should return
+JSON with `ok: true`; a Vercel HTML 404 there means the deployment is not using
+the repository root or has not deployed the `api/` function.
+
 ---
 
 ## The demo (≈2 minutes)

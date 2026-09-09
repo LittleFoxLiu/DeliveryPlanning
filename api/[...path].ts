@@ -28,6 +28,11 @@ function initialise(): Promise<void> {
 export default async function handler(req: any, res: any): Promise<void> {
   try {
     await initialise();
+    // Some Vercel adapters pass a catch-all function the path with `/api`
+    // removed. The Express app is mounted at `/api`, so normalize both forms.
+    if (typeof req.url === 'string' && !/^\/api(?:\/|\?|$)/.test(req.url)) {
+      req.url = `/api${req.url.startsWith('/') ? req.url : `/${req.url}`}`;
+    }
     app(req, res);
   } catch (error) {
     console.error('[vercel] API initialisation failed', error);
