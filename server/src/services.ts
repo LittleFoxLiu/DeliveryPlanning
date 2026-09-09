@@ -185,13 +185,14 @@ export function injectTraffic(input: {
       }
       await roads.setStatus(primary.id, 'closed', 0);
       changed.push(primary.id);
-      const nodes = new Set([`${primary.ax},${primary.ay}`, `${primary.bx},${primary.by}`]);
+      // Gridlock the surrounding block (~2 cells) so the driver can't just nip
+      // around it — a sustained delay the Monitoring Agent will keep seeing.
+      const cx = (primary.ax + primary.bx) / 2;
+      const cy = (primary.ay + primary.by) / 2;
       for (const r of await roads.all()) {
         if (r.id === primary.id || r.status === 'closed') continue;
-        if (nodes.has(`${r.ax},${r.ay}`) || nodes.has(`${r.bx},${r.by}`)) {
-          await roads.setStatus(r.id, 'heavy', 15);
-          changed.push(r.id);
-        }
+        const near = Math.hypot((r.ax + r.bx) / 2 - cx, (r.ay + r.by) / 2 - cy);
+        if (near <= 2.6) { await roads.setStatus(r.id, 'heavy', 18); changed.push(r.id); }
       }
       await emitAgentEvent({
         agent: 'TrafficFeed', eventType: 'traffic_updated',
