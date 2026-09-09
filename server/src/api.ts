@@ -6,7 +6,8 @@ import { rateLimit, h } from './http.js';
 import { badRequest, forbidden, notFound, conflict, HttpError } from './util.js';
 import { asObject, str, enumVal, int, coord, futureTs, idParam } from './validation.js';
 import {
-  users, merchants, stores, customers, drivers, orders, deliveries, roads, traffic, memberships,
+  users, merchants, stores, customers, drivers, orders, deliveries, roads, traffic, memberships, products,
+  type OrderItemInput, type ProductRow,
 } from './repo.js';
 import { listEvents, bus } from './events.js';
 import { coordinator } from './agents/coordinator.js';
@@ -216,6 +217,10 @@ api.post('/merchant/orders', ...merchantOnly, h(async (req, res) => {
   if (!store || store.merchant_id !== req.user!.refId) throw forbidden('Not your store');
   const dest = deliveryPoint(b, store);
   const customer = await customers.create(str(b, 'customerName', { min: 1, max: 120 }));
+  const resolved = await resolveOrderItems(b.items, req.user!.refId!, {
+    packageSize: enumVal(b, 'packageSize', ['small', 'medium', 'large'] as const, 'small'),
+    volume: int(b, 'volume', { min: 1, max: 20, fallback: 1 }),
+  });
   const order = await orders.create({
     merchant_id: req.user!.refId!,
     store_id: storeId,
@@ -226,12 +231,62 @@ api.post('/merchant/orders', ...merchantOnly, h(async (req, res) => {
     delivery_lng: dest.lng,
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
-    package_size: enumVal(b, 'packageSize', ['small', 'medium', 'large'] as const, 'small'),
-    volume: int(b, 'volume', { min: 1, max: 20, fallback: 1 }),
+    package_size: resolved.packageSize,
+    volume: Math.min(20, resolved.volume),
     note: str(b, 'note', { optional: true, max: 280 }) || null,
-    items: parseItems(b.items),
+    items: resolved.items,
   });
   res.status(201).json({ order: await orderView(order) });
+}));
+
+/* ------------------------------------------------------- merchant catalogue */
+function productView(p: ProductRow) {
+  return {
+    id: p.id, name: p.name, description: p.description, priceCents: p.price_cents,
+    packageSize: p.package_size, active: p.active === 1,
+  };
+}
+
+api.get('/merchant/products', ...merchantOnly, h(async (req, res) => {
+  res.json({ products: (await products.byMerchant(req.user!.refId!)).map(productView) });
+}));
+
+api.post('/merchant/products', ...merchantOnly, h(async (req, res) => {
+  const b = asObject(req.body);
+  const p = await products.create({
+    merchantId: req.user!.refId!,
+    name: str(b, 'name', { min: 1, max: 120 }),
+    description: str(b, 'description', { optional: true, max: 400 }) || null,
+    priceCents: int(b, 'priceCents', { min: 0, max: 10_000_000, fallback: 0 }),
+    packageSize: enumVal(b, 'packageSize', ['small', 'medium', 'large'] as const, 'small'),
+  });
+  res.status(201).json({ product: productView(p) });
+}));
+
+api.patch('/merchant/products/:id', ...merchantOnly, h(async (req, res) => {
+  const b = asObject(req.body);
+  const existing = await products.byId(idParam(req.params.id, 'product id'));
+  if (!existing || existing.merchant_id !== req.user!.refId) throw notFound('Product not found');
+  const patch: Parameters<typeof products.update>[1] = {};
+  if (b.name !== undefined) patch.name = str(b, 'name', { min: 1, max: 120 });
+  if (b.description !== undefined) patch.description = str(b, 'description', { optional: true, max: 400 }) || null;
+  if (b.priceCents !== undefined) patch.price_cents = int(b, 'priceCents', { min: 0, max: 10_000_000 });
+  if (b.packageSize !== undefined) patch.package_size = enumVal(b, 'packageSize', ['small', 'medium', 'large'] as const);
+  if (b.active !== undefined) patch.active = b.active === true || b.active === 1 ? 1 : 0;
+  res.json({ product: productView((await products.update(existing.id, patch))!) });
+}));
+
+api.delete('/merchant/products/:id', ...merchantOnly, h(async (req, res) => {
+  const existing = await products.byId(idParam(req.params.id, 'product id'));
+  if (!existing || existing.merchant_id !== req.user!.refId) throw notFound('Product not found');
+  await products.update(existing.id, { active: 0 });
+  res.json({ ok: true });
+}));
+
+api.get('/directory/merchants/:merchantId/products', authenticate(true), h(async (req, res) => {
+  const merchantId = idParam(req.params.merchantId, 'merchant id');
+  if (!(await merchants.byId(merchantId))) throw notFound('Merchant not found');
+  res.json({ products: (await products.byMerchant(merchantId, { activeOnly: true })).map(productView) });
 }));
 
 api.post('/merchant/orders/:id/ready', ...merchantOnly, h(async (req, res) => {
@@ -289,6 +344,10 @@ api.post('/customer/orders', ...customerOnly, h(async (req, res) => {
   const store = await stores.byId(storeId);
   if (!store) throw notFound('Store not found');
   const dest = deliveryPoint(b, store);
+  const resolved = await resolveOrderItems(b.items, store.merchant_id, {
+    packageSize: enumVal(b, 'packageSize', ['small', 'medium', 'large'] as const, 'small'),
+    volume: int(b, 'volume', { min: 1, max: 20, fallback: 1 }),
+  });
   const order = await orders.create({
     merchant_id: store.merchant_id,
     store_id: storeId,
@@ -299,10 +358,10 @@ api.post('/customer/orders', ...customerOnly, h(async (req, res) => {
     delivery_lng: dest.lng,
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
-    package_size: enumVal(b, 'packageSize', ['small', 'medium', 'large'] as const, 'small'),
-    volume: int(b, 'volume', { min: 1, max: 20, fallback: 1 }),
+    package_size: resolved.packageSize,
+    volume: Math.min(20, resolved.volume),
     note: str(b, 'note', { optional: true, max: 280 }) || null,
-    items: parseItems(b.items),
+    items: resolved.items,
   });
   res.status(201).json({ order: await orderView(order) });
 }));
@@ -415,19 +474,62 @@ api.post('/merchant/admin-request', ...merchantOnly, h(async (req, res) => {
   await memberships.requestMerchantAdmin(req.user!.id, str(asObject(req.body), 'inviteCode', { min: 4, max: 80 }));
   res.json({ ok: true });
 }));
-api.get('/merchant/membership', ...merchantOnly, h(async (req, res) => {
-  res.json({ requests: await memberships.merchantRequests(req.user!.refId!) });
+
+/* --------------------------------------------------- admin: add to network */
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+/** Create a sign-in account for an admin-provisioned merchant/driver/customer.
+ *  Returns the generated password once so the admin can hand it over. */
+async function provisionUser(email: string, role: 'merchant' | 'driver' | 'customer', name: string, refId: string) {
+  const normalized = email.toLowerCase();
+  if (!EMAIL_RE.test(normalized)) throw badRequest('Invalid email');
+  if (await users.byEmail(normalized)) throw conflict('Email already registered');
+  const password = randomBytes(9).toString('base64url');
+  const { hash, salt } = hashPassword(password);
+  await users.create({ email: normalized, passwordHash: hash, passwordSalt: salt, role, name, refId });
+  return { email: normalized, password };
+}
+
+api.post('/admin/merchants', ...adminOnly, h(async (req, res) => {
+  const b = asObject(req.body);
+  const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
+  const store = await stores.create({
+    merchantId: merchant.id,
+    name: str(b, 'storeName', { min: 1, max: 120 }),
+    pickupLat: coord(b, 'storeLat'),
+    pickupLng: coord(b, 'storeLng'),
+  });
+  const contact = str(b, 'contactName', { min: 1, max: 120 });
+  const credentials = await provisionUser(str(b, 'email', { max: 200 }), 'merchant', contact, merchant.id);
+  res.status(201).json({
+    merchant: { id: merchant.id, name: merchant.name },
+    store: { id: store.id, name: store.name, pickup: { x: store.pickupLat, y: store.pickupLng } },
+    credentials,
+  });
 }));
-api.post('/merchant/membership/:id', ...merchantOnly, h(async (req, res) => {
-  await memberships.decideDriverRequest(req.user!.refId!, idParam(req.params.id, 'request id'), req.body?.accept === true);
-  res.json({ ok: true });
+
+api.post('/admin/drivers', ...adminOnly, h(async (req, res) => {
+  const b = asObject(req.body);
+  const name = str(b, 'name', { min: 1, max: 120 });
+  const created = await drivers.create({
+    name,
+    vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
+    capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }),
+    maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
+    lat: coord(b, 'lat'),
+    lng: coord(b, 'lng'),
+    status: 'available',
+  });
+  const credentials = await provisionUser(str(b, 'email', { max: 200 }), 'driver', name, created.id);
+  res.status(201).json({ driver: { id: created.id, name }, credentials });
 }));
-api.post('/driver/store-request', ...driverOnly, h(async (req, res) => {
-  await memberships.requestDriverStore(req.user!.id, idParam(String(asObject(req.body).storeId), 'store id'));
-  res.json({ ok: true });
-}));
-api.get('/driver/membership', ...driverOnly, h(async (req, res) => {
-  res.json({ stores: await memberships.storesForDriver(req.user!.refId!) });
+
+api.post('/admin/customers', ...adminOnly, h(async (req, res) => {
+  const b = asObject(req.body);
+  const name = str(b, 'name', { min: 1, max: 120 });
+  const customer = await customers.create(name);
+  const credentials = await provisionUser(str(b, 'email', { max: 200 }), 'customer', name, customer.id);
+  res.status(201).json({ customer: { id: customer.id, name }, credentials });
 }));
 
 api.get('/admin/overview', ...adminOnly, h(async (_req, res) => {
@@ -554,4 +656,44 @@ function parseItems(raw: unknown): { name: string; qty: number }[] {
     const o = asObject(it);
     return { name: str(o, 'name', { min: 1, max: 80 }), qty: int(o, 'qty', { min: 1, max: 99, fallback: 1 }) };
   });
+}
+
+const SIZE_RANK = { small: 0, medium: 1, large: 2 } as const;
+type Size = keyof typeof SIZE_RANK;
+
+/** Turn a request body's `items` into order lines. Product-backed lines
+ *  ({ productId, qty }) are validated against the merchant's catalogue and
+ *  snapshot the name/price/size; free-text lines ({ name, qty }) still work.
+ *  Returns the derived package size + volume so the caller need not pass them. */
+async function resolveOrderItems(
+  raw: unknown, merchantId: string, fallback: { packageSize: Size; volume: number },
+): Promise<{ items: OrderItemInput[]; packageSize: Size; volume: number }> {
+  const arr = Array.isArray(raw) ? raw.slice(0, 30) : [];
+  const productLines = arr.filter((it) => it && typeof it === 'object' && 'productId' in (it as object));
+
+  if (productLines.length) {
+    const items: OrderItemInput[] = [];
+    let size: Size = 'small';
+    let volume = 0;
+    for (const line of productLines) {
+      const o = asObject(line);
+      const productId = idParam(o.productId, 'productId');
+      const qty = int(o, 'qty', { min: 1, max: 99, fallback: 1 });
+      const product = await products.byId(productId);
+      if (!product || product.merchant_id !== merchantId || !product.active) {
+        throw badRequest('One of the selected products is not available from this store');
+      }
+      items.push({ name: product.name, qty, productId: product.id, unitPriceCents: product.price_cents });
+      if (SIZE_RANK[product.package_size] > SIZE_RANK[size]) size = product.package_size;
+      volume += qty;
+    }
+    return { items, packageSize: size, volume: Math.max(1, volume) };
+  }
+
+  const legacy = parseItems(raw);
+  return {
+    items: legacy,
+    packageSize: fallback.packageSize,
+    volume: legacy.length ? Math.max(1, legacy.reduce((n, i) => n + i.qty, 0)) : fallback.volume,
+  };
 }

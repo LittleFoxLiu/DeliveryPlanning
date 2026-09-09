@@ -11,12 +11,19 @@ export interface AgentEvent {
   message: string; orderId?: string | null; order_id?: string | null; data?: unknown;
 }
 
+export interface OrderItem { name: string; qty: number; productId?: string | null; unitPriceCents?: number }
+
+export interface ProductDto {
+  id: string; name: string; description: string | null;
+  priceCents: number; packageSize: string; active: boolean;
+}
+
 export interface OrderDto {
   id: string; code: string; status: string; priority: string; packageSize: string; volume: number;
   deadlineTs: string; note: string | null; pickup: Point; dropoff: Point;
   merchantId?: string; storeId?: string; storeName?: string | null;
   customerId?: string; customerName: string;
-  items: { name: string; qty: number }[]; createdAt?: string; readyAt?: string | null;
+  items: OrderItem[]; itemsTotalCents?: number; createdAt?: string; readyAt?: string | null;
   delivery?: DeliveryDto | null;
 }
 

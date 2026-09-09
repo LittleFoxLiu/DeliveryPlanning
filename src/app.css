@@ -54,6 +54,13 @@ code { background: #eef0f4; padding: 1px 5px; border-radius: 5px; font-size: .9e
 .who { color: var(--muted); font-weight: 600; }
 main#view { padding: 22px; max-width: 1280px; width: 100%; margin: 0 auto; }
 
+.subnav { display: flex; gap: 4px; padding: 0 22px; background: var(--card); border-bottom: 1px solid var(--line);
+  position: sticky; top: 53px; z-index: 19; overflow-x: auto; }
+.subnav-link { padding: 11px 14px; font-weight: 600; font-size: 13px; color: var(--muted); text-decoration: none;
+  border-bottom: 2px solid transparent; white-space: nowrap; }
+.subnav-link:hover { color: var(--ink); }
+.subnav-link.active { color: var(--accent); border-bottom-color: var(--accent); }
+
 /* layout */
 .grid2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: 18px; align-items: start; }
 .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
@@ -135,3 +142,30 @@ form.inline-form .full { grid-column: 1 / -1; }
 .big-eta { font-size: 30px; font-weight: 800; }
 details.raw { margin-top: 10px; }
 details.raw pre { background: #0f1729; color: #cfe0ff; padding: 12px; border-radius: 8px; overflow: auto; font-size: 12px; max-height: 280px; }
+
+/* storefront */
+.shop-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+.shop-card { border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 6px; background: var(--card); }
+.shop-card h3 { font-size: 14px; margin: 0; }
+.shop-card .price { font-weight: 800; font-size: 16px; }
+.shop-card .desc { color: var(--muted); font-size: 12px; flex: 1; }
+.shop-card .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.merch-card { text-align: left; cursor: pointer; }
+.merch-card:hover { border-color: var(--accent); background: #faf3f1; }
+.merch-card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px #f9d9d2; }
+
+.stepper { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.stepper button { border: 0; background: var(--card); width: 30px; height: 30px; font-size: 16px; cursor: pointer; font-weight: 700; color: var(--ink); }
+.stepper button:hover { background: #f1f2f5; }
+.stepper span { min-width: 30px; text-align: center; font-weight: 700; font-size: 13px; }
+
+.wizard-steps { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.wizard-steps .step { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--muted); }
+.wizard-steps .step .num { width: 20px; height: 20px; border-radius: 999px; display: grid; place-items: center; background: #edeef1; font-size: 11px; }
+.wizard-steps .step.active { color: var(--ink); }
+.wizard-steps .step.active .num { background: var(--accent); color: #fff; }
+.wizard-steps .step.done .num { background: var(--green); color: #fff; }
+
+.cart-line { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.cart-total { display: flex; justify-content: space-between; font-weight: 800; padding-top: 10px; font-size: 15px; }
+.cart-empty { color: var(--muted); font-size: 13px; padding: 8px 0; }

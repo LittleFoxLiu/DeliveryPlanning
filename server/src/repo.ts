@@ -43,18 +43,8 @@ export const memberships = {
     await q('INSERT INTO join_requests (id, requester_user_id, kind, target_admin_id) VALUES (?, ?, \'merchant_admin\', ?)', [rid, userId, invite.admin_id]);
     return rid;
   },
-  async requestDriverStore(userId: string, storeId: string) {
-    const existing = await q1<{ id: string }>(`SELECT id FROM join_requests WHERE requester_user_id = ? AND kind = 'driver_store' AND target_store_id = ? AND status = 'pending'`, [userId, storeId]);
-    if (existing) return existing.id;
-    const rid = id('req');
-    await q('INSERT INTO join_requests (id, requester_user_id, kind, target_store_id) VALUES (?, ?, \'driver_store\', ?)', [rid, userId, storeId]);
-    return rid;
-  },
   adminRequests(adminId: string) {
     return q(`SELECT r.id, r.status, r.created_at, u.id AS requester_id, u.email, u.name FROM join_requests r JOIN users u ON u.id = r.requester_user_id WHERE r.kind = 'merchant_admin' AND r.target_admin_id = ? ORDER BY r.created_at DESC`, [adminId]);
-  },
-  merchantRequests(merchantId: string) {
-    return q(`SELECT r.id, r.status, r.created_at, u.id AS requester_id, u.email, u.name, s.id AS store_id, s.name AS store_name FROM join_requests r JOIN users u ON u.id = r.requester_user_id JOIN stores s ON s.id = r.target_store_id WHERE r.kind = 'driver_store' AND s.merchant_id = ? ORDER BY r.created_at DESC`, [merchantId]);
   },
   async decideAdminRequest(adminId: string, requestId: string, accept: boolean) {
     const r = await q1<{ id: string; requester_user_id: string; target_admin_id: string | null }>(`SELECT id, requester_user_id, target_admin_id FROM join_requests WHERE id = ? AND kind = 'merchant_admin' AND status = 'pending'`, [requestId]);
@@ -67,15 +57,6 @@ export const memberships = {
       }
     });
   },
-  async decideDriverRequest(merchantId: string, requestId: string, accept: boolean) {
-    const r = await q1<{ id: string; requester_user_id: string; target_store_id: string | null }>(`SELECT r.id, r.requester_user_id, r.target_store_id FROM join_requests r JOIN stores s ON s.id = r.target_store_id WHERE r.id = ? AND r.kind = 'driver_store' AND r.status = 'pending' AND s.merchant_id = ?`, [requestId, merchantId]);
-    if (!r || !r.target_store_id) throw new Error('Join request not found');
-    await tx(async () => {
-      await q(`UPDATE join_requests SET status = ?, decided_at = ? WHERE id = ?`, [accept ? 'accepted' : 'rejected', nowIso(), requestId]);
-      if (accept) await q(`INSERT INTO driver_stores (driver_id, store_id) SELECT ref_id, ? FROM users WHERE id = ? AND role = 'driver' ON CONFLICT DO NOTHING`, [r.target_store_id, r.requester_user_id]);
-    });
-  },
-  storesForDriver(driverId: string) { return q<{ id: string; name: string; merchant_name: string }>(`SELECT s.id, s.name, m.name AS merchant_name FROM driver_stores ds JOIN stores s ON s.id = ds.store_id JOIN merchants m ON m.id = s.merchant_id WHERE ds.driver_id = ? ORDER BY m.name, s.name`, [driverId]); },
 };
 
 /* -------------------------------------------------------------- merchants */
@@ -104,6 +85,32 @@ export const stores = {
 export const customers = {
   async create(name: string) { const cid = id('cus'); await q(`INSERT INTO customers (id, name) VALUES (?, ?)`, [cid, name]); return { id: cid, name }; },
   byId(cid: string) { return q1<{ id: string; name: string }>(`SELECT * FROM customers WHERE id = ?`, [cid]); },
+};
+
+/* --------------------------------------------------------------- products */
+export interface ProductRow {
+  id: string; merchant_id: string; name: string; description: string | null;
+  price_cents: number; package_size: 'small' | 'medium' | 'large'; active: number;
+}
+export const products = {
+  async create(input: { merchantId: string; name: string; description?: string | null; priceCents: number; packageSize: ProductRow['package_size'] }) {
+    const pid = id('prd');
+    await q(`INSERT INTO products (id, merchant_id, name, description, price_cents, package_size) VALUES (?,?,?,?,?,?)`,
+      [pid, input.merchantId, input.name, input.description ?? null, input.priceCents, input.packageSize]);
+    return (await products.byId(pid))!;
+  },
+  byId(pid: string) { return q1<ProductRow>(`SELECT * FROM products WHERE id = ?`, [pid]); },
+  byMerchant(mid: string, opts: { activeOnly?: boolean } = {}) {
+    return q<ProductRow>(
+      `SELECT * FROM products WHERE merchant_id = ?${opts.activeOnly ? ' AND active = 1' : ''} ORDER BY created_at DESC`, [mid]);
+  },
+  async update(pid: string, patch: Partial<Pick<ProductRow, 'name' | 'description' | 'price_cents' | 'package_size' | 'active'>>) {
+    const keys = Object.keys(patch);
+    if (!keys.length) return products.byId(pid);
+    const set = keys.map((k) => `${k} = ?`).join(', ');
+    await q(`UPDATE products SET ${set} WHERE id = ?`, [...keys.map((k) => (patch as Record<string, unknown>)[k]), pid]);
+    return products.byId(pid);
+  },
 };
 
 /* ---------------------------------------------------------------- drivers */
@@ -156,8 +163,10 @@ export interface OrderRow {
   created_at: string; ready_at: string | null;
 }
 
+export interface OrderItemInput { name: string; qty: number; productId?: string | null; unitPriceCents?: number }
+
 export const orders = {
-  async create(input: Omit<OrderRow, 'id' | 'status' | 'created_at' | 'ready_at'> & { items?: { name: string; qty: number }[] }): Promise<OrderRow> {
+  async create(input: Omit<OrderRow, 'id' | 'status' | 'created_at' | 'ready_at'> & { items?: OrderItemInput[] }): Promise<OrderRow> {
     const oid = id('ord');
     await tx(async () => {
       await q(`
@@ -166,13 +175,18 @@ export const orders = {
         [oid, input.merchant_id, input.store_id, input.customer_id, input.pickup_lat, input.pickup_lng,
           input.delivery_lat, input.delivery_lng, input.priority, input.deadline_ts, input.package_size, input.volume, input.note ?? null]);
       for (const item of input.items ?? []) {
-        await q(`INSERT INTO order_items (order_id, name, qty) VALUES (?, ?, ?)`, [oid, item.name, item.qty]);
+        await q(`INSERT INTO order_items (order_id, product_id, name, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?)`,
+          [oid, item.productId ?? null, item.name, item.qty, item.unitPriceCents ?? 0]);
       }
     });
     return (await orders.byId(oid))!;
   },
   byId(oid: string) { return q1<OrderRow>(`SELECT * FROM orders WHERE id = ?`, [oid]); },
-  items(oid: string) { return q<{ name: string; qty: number }>(`SELECT name, qty FROM order_items WHERE order_id = ? ORDER BY id`, [oid]); },
+  async items(oid: string) {
+    const rows = await q<{ name: string; qty: number; product_id: string | null; unit_price_cents: number }>(
+      `SELECT name, qty, product_id, unit_price_cents FROM order_items WHERE order_id = ? ORDER BY id`, [oid]);
+    return rows.map((r) => ({ name: r.name, qty: r.qty, productId: r.product_id, unitPriceCents: r.unit_price_cents }));
+  },
   byMerchant(mid: string) { return q<OrderRow>(`SELECT * FROM orders WHERE merchant_id = ? ORDER BY created_at DESC`, [mid]); },
   byCustomer(cid: string) { return q<OrderRow>(`SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC`, [cid]); },
   all() { return q<OrderRow>(`SELECT * FROM orders ORDER BY created_at DESC`); },

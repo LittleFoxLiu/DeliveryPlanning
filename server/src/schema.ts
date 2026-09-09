@@ -68,12 +68,6 @@ CREATE TABLE IF NOT EXISTS merchant_admins (
   admin_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE TABLE IF NOT EXISTS driver_stores (
-  driver_id text NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
-  store_id text NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (driver_id, store_id)
-);
 CREATE TABLE IF NOT EXISTS join_requests (
   id text PRIMARY KEY,
   requester_user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -108,11 +102,25 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS idx_orders_merchant ON orders(merchant_id);
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 
+CREATE TABLE IF NOT EXISTS products (
+  id text PRIMARY KEY,
+  merchant_id text NOT NULL REFERENCES merchants(id),
+  name text NOT NULL,
+  description text,
+  price_cents integer NOT NULL DEFAULT 0,
+  package_size text NOT NULL DEFAULT 'small' CHECK (package_size IN ('small','medium','large')),
+  active integer NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_products_merchant ON products(merchant_id, active);
+
 CREATE TABLE IF NOT EXISTS order_items (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   order_id text NOT NULL REFERENCES orders(id),
+  product_id text REFERENCES products(id),
   name text NOT NULL,
-  qty integer NOT NULL DEFAULT 1
+  qty integer NOT NULL DEFAULT 1,
+  unit_price_cents integer NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
 
@@ -192,12 +200,16 @@ CREATE TABLE IF NOT EXISTS agent_events (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_events_order ON agent_events(order_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_events_id ON agent_events(id DESC);
+
+-- Additive migrations (safe to re-run against an existing database).
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS product_id text REFERENCES products(id);
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_price_cents integer NOT NULL DEFAULT 0;
 `;
 
 /** Tables in dependency order (parents first) — used for TRUNCATE in tests. */
 export const TABLES = [
-  'join_requests', 'driver_stores', 'merchant_admins', 'admin_invites',
-  'agent_events', 'assignments', 'routes', 'deliveries', 'order_items', 'orders',
+  'join_requests', 'merchant_admins', 'admin_invites',
+  'agent_events', 'assignments', 'routes', 'deliveries', 'order_items', 'orders', 'products',
   'driver_locations', 'driver_status', 'drivers', 'customers', 'stores', 'merchants',
   'road_segments', 'traffic_conditions', 'users',
 ];

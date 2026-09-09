@@ -169,7 +169,29 @@ async function doLogin(email: string, password: string): Promise<void> {
   }
 }
 
-function shell(user: User): HTMLElement {
+/** Per-role page navigation. Pages are hash routes: #/<role>/<page>. */
+export const NAV: Record<string, { id: string; label: string }[]> = {
+  customer: [{ id: 'order', label: 'Order' }, { id: 'orders', label: 'My orders' }],
+  merchant: [{ id: 'orders', label: 'Orders' }, { id: 'new', label: 'New order' }, { id: 'catalogue', label: 'Catalogue' }, { id: 'account', label: 'Account' }],
+  driver: [{ id: 'deliveries', label: 'Deliveries' }, { id: 'account', label: 'Account' }],
+  admin: [{ id: 'overview', label: 'Overview' }, { id: 'orders', label: 'Orders' }, { id: 'fleet', label: 'Fleet' }, { id: 'network', label: 'Network' }],
+};
+
+function currentPage(role: string): string {
+  const pages = NAV[role] || [];
+  const m = location.hash.match(/^#\/([a-z]+)\/([a-z]+)/i);
+  if (m && m[1] === role && pages.some((p) => p.id === m[2])) return m[2];
+  return pages[0]?.id ?? '';
+}
+
+/** Navigate to a page of the current role (updates the hash → triggers route). */
+export function goto(page: string): void {
+  const user = getUser();
+  if (user) location.hash = `#/${user.role}/${page}`;
+}
+
+function shell(user: User, page: string): HTMLElement {
+  const pages = NAV[user.role] || [];
   app.innerHTML = `
     <div class="shell">
       <header class="topbar">
@@ -179,9 +201,10 @@ function shell(user: User): HTMLElement {
           <button id="logout" class="btn ghost">Sign out</button>
         </div>
       </header>
+      ${pages.length > 1 ? `<nav class="subnav">${pages.map((p) => `<a class="subnav-link${p.id === page ? ' active' : ''}" href="#/${user.role}/${p.id}">${esc(p.label)}</a>`).join('')}</nav>` : ''}
       <main id="view"></main>
     </div>`;
-  app.querySelector('#logout')!.addEventListener('click', () => { clearSession(); stopPolling(); route(); });
+  app.querySelector('#logout')!.addEventListener('click', () => { clearSession(); stopPolling(); location.hash = ''; route(); });
   return app.querySelector<HTMLElement>('#view')!;
 }
 
@@ -193,12 +216,20 @@ function route(): void {
   stopPolling();
   const user = getUser();
   if (!user || !getToken()) { loginView(); return; }
-  const view = shell(user);
-  const renderers: Record<string, (el: HTMLElement, user: User) => void> = {
+  const page = currentPage(user.role);
+  const want = `#/${user.role}/${page}`;
+  if (location.hash !== want) { history.replaceState(null, '', location.pathname + location.search + want); }
+  const view = shell(user, page);
+  const renderers: Record<string, (el: HTMLElement, user: User, page: string) => void> = {
     admin: renderAdmin, merchant: renderMerchant, driver: renderDriver, customer: renderCustomer,
   };
-  (renderers[user.role] ?? (() => { view.innerHTML = '<p>Unknown role</p>'; }))(view, user);
+  (renderers[user.role] ?? (() => { view.innerHTML = '<p>Unknown role</p>'; }))(view, user, page);
 }
+
+window.addEventListener('hashchange', () => {
+  if (/^#(auth_token|auth_error)/.test(location.hash)) return;
+  route();
+});
 
 const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
 const oauthToken = hash.get('auth_token');

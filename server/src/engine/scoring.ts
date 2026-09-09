@@ -100,7 +100,10 @@ export function scoreDriver(
     ? Math.round((deadlineMs - etaCompletionMs) / 60_000)
     : -9999;
   const deadlineSatisfied = deadlineSlackMin >= 0;
-  if (!deadlineSatisfied) disqualifiers.push('deadline_missed');
+  // A driver who will be late is NOT disqualified — a late delivery still beats
+  // no delivery, and the Monitoring Agent tracks the risk. Lateness is a heavy
+  // soft penalty instead (below), so an on-time driver always wins when one
+  // exists. Only a genuinely unreachable route is a hard routing failure.
 
   const straightBaseline = estimate.reachable
     ? estimate.toPickup.baselineMinutes + estimate.handlingMinutes + estimate.toDropoff.baselineMinutes
@@ -154,6 +157,11 @@ export function scoreDriver(
   // distance: driver already at pickup -> full; across the grid -> 0
   const distanceScore = clamp(1 - physicalDistanceUnits / GRID_SPAN, 0, 1);
 
+  // Heavy soft penalty for a projected late arrival (in points, not a factor):
+  // ~0.8 pt per minute late, capped, on top of the near-zero deadline factor.
+  const lateByMin = deadlineSatisfied ? 0 : -deadlineSlackMin;
+  const latePenalty = Number(clamp(lateByMin * 0.8, 0, 45).toFixed(2));
+
   const contributions = {
     eta: Number((etaScore * WEIGHTS.eta).toFixed(2)),
     efficiency: Number((efficiencyScore * WEIGHTS.efficiency).toFixed(2)),
@@ -161,14 +169,17 @@ export function scoreDriver(
     workload: Number((workloadScore * WEIGHTS.workload).toFixed(2)),
     vehicle: Number((vehicleScore * WEIGHTS.vehicle).toFixed(2)),
     distance: Number((distanceScore * WEIGHTS.distance).toFixed(2)),
+    ...(latePenalty ? { latePenalty: -latePenalty } : {}),
   };
-  const score = Number(Object.values(contributions).reduce((a, b) => a + b, 0).toFixed(2));
+  const score = Math.max(0, Number(Object.values(contributions).reduce((a, b) => a + b, 0).toFixed(2)));
 
   const explanation = [
     `ETA to merchant: ${factors.etaToMerchantMin} min`,
     `ETA merchant → customer: ${factors.etaMerchantToCustomerMin} min`,
     `Total delivery time: ${totalDeliveryMin} min`,
-    `Deadline: satisfied with ${deadlineSlackMin} min to spare`,
+    deadlineSatisfied
+      ? `Deadline: satisfied with ${deadlineSlackMin} min to spare`
+      : `Deadline: at risk — projected ${-deadlineSlackMin} min late`,
     `Route efficiency: ${routeEfficiencyPct}%`,
     `Driver workload: ${driver.currentOrderCount}/${driver.capacity} active`,
     `Vehicle: ${driver.vehicleType} (fits ${order.packageSize}, ${vehicleSlack} size${vehicleSlack === 1 ? '' : 's'} of spare)`,
@@ -196,6 +207,9 @@ export function compareAssignments(breakdowns: ScoreBreakdown[]): Comparison {
   const runnerUp = eligRanked[1];
   const margin = winner && runnerUp ? Number((winner.score - runnerUp.score).toFixed(2)) : winner ? winner.score : 0;
 
+  const lateNote = winner && !winner.factors.deadlineSatisfied
+    ? ` Best effort only — projected ${-winner.factors.deadlineSlackMin} min past the deadline.` : '';
+
   let rationale: string;
   if (!winner) {
     rationale = 'No eligible driver: ' + (breakdowns[0]?.disqualifiers.join(', ') || 'none available');
@@ -206,5 +220,5 @@ export function compareAssignments(breakdowns: ScoreBreakdown[]): Comparison {
   } else {
     rationale = `Driver ${winner.driverId} is the only eligible candidate (score ${winner.score}).`;
   }
-  return { ranked, winner, margin, rationale };
+  return { ranked, winner, margin, rationale: rationale + lateNote };
 }

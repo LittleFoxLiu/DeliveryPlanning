@@ -44,10 +44,16 @@ describe('scoring engine', () => {
     expect(s.score).toBe(0);
   });
 
-  it('disqualifies when the deadline cannot be met', () => {
-    const s = scoreDriver(baseOrder({ deadlineTs: new Date(Date.now() + 10 * 60_000).toISOString() }), baseDriver(), estimate(20, 20));
-    expect(s.eligible).toBe(false);
-    expect(s.disqualifiers).toContain('deadline_missed');
+  it('still assigns a late driver but penalises the miss heavily', () => {
+    const late = scoreDriver(baseOrder({ deadlineTs: new Date(Date.now() + 10 * 60_000).toISOString() }), baseDriver(), estimate(20, 20));
+    // eligible (a late delivery beats no delivery), but carries a lateness penalty
+    expect(late.eligible).toBe(true);
+    expect(late.factors.deadlineSatisfied).toBe(false);
+    expect(late.contributions.latePenalty).toBeLessThan(0);
+    expect(late.explanation.join(' ')).toMatch(/at risk/);
+    // an on-time driver on the same route always outranks the late one
+    const onTime = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_ontime' }), estimate(20, 20));
+    expect(compareAssignments([late, onTime]).winner?.driverId).toBe('drv_ontime');
   });
 
   it('disqualifies a full driver and a driver on break', () => {

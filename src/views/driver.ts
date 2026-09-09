@@ -13,20 +13,18 @@ interface DriverDelivery {
 interface Me { location: Point | null; status: string; name: string; vehicleType: string }
 
 let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
-let directory: { id: string; name: string; stores: { id: string; name: string }[] }[] = [];
-let joined: { id: string; name: string; merchant_name: string }[] = [];
 let selectingPosition = false;
+let currentPage = 'deliveries';
 
-export async function renderDriver(el: HTMLElement): Promise<void> {
+export async function renderDriver(el: HTMLElement, _user: unknown, page = 'deliveries'): Promise<void> {
   resetSig('driver');
-  try { grid = await get('/meta/grid'); } catch { /* ignore */ }
-  try { directory = (await get<{ merchants: typeof directory }>('/directory/merchants')).merchants; } catch { /* ignore */ }
-  try { joined = (await get<{ stores: typeof joined }>('/driver/membership')).stores; } catch { /* ignore */ }
+  currentPage = page;
+  if (!grid.roads.length) { try { grid = await get('/meta/grid'); } catch { /* ignore */ } }
   const draw = async () => {
     try {
       const { deliveries, me } = await get<{ deliveries: DriverDelivery[]; me: Me }>('/driver/deliveries');
       const active = deliveries.filter((d) => !['delivered', 'cancelled', 'failed'].includes(d.status));
-      if (!changed('driver', { deliveries, me, directory, joined })) return;
+      if (!changed('driver', { deliveries, me, page, selectingPosition })) return;
       if (patchView(el, view(active, deliveries, me))) wire(el); else resetSig('driver');
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) handleUnauthed();
@@ -64,28 +62,44 @@ function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
   });
 
   const here = me.location ? `(${me.location.x}, ${me.location.y})` : 'unknown';
+  const mapCard = (selectable: boolean) => `<div class="card">
+    <div class="card-head"><h2>${selectable ? 'Your position' : 'Your route'}</h2><span class="muted">you are the teal dot</span></div>
+    ${renderMap({ size: grid.size, roads: grid.roads, markers, paths, selectable })}
+  </div>`;
+
+  if (currentPage === 'account') {
+    return `
+      <div class="page-head"><div><h1>Account</h1><p>You are at <strong>${here}</strong> ${statusChip(me.status)}</p></div></div>
+      <div class="grid2">
+        <div class="card">
+          <div class="card-head"><h2>Availability</h2></div>
+          <dl class="kv">
+            <dt>Name</dt><dd>${esc(me.name)}</dd>
+            <dt>Vehicle</dt><dd>${esc(me.vehicleType)}</dd>
+            <dt>Status</dt><dd>${statusChip(me.status)}</dd>
+            <dt>Position</dt><dd>${here}</dd>
+          </dl>
+          <div class="pill-row" style="margin-top:12px">
+            <button class="btn ghost" data-status="break">Take a break</button>
+            <button class="btn ghost" data-status="available">Go available</button>
+            <button class="btn ghost" data-status="offline">Go offline</button>
+            ${me.status !== 'available' ? `<button class="btn" data-position-start>${selectingPosition ? 'Cancel' : 'Set position on map'}</button>` : ''}
+          </div>
+          ${me.status === 'available' ? '<p class="muted" style="margin-top:8px">Switch to break or offline to reposition yourself on the map.</p>' : ''}
+        </div>
+        ${mapCard(selectingPosition)}
+      </div>`;
+  }
 
   return `
     <div class="page-head">
-      <div><h1>Driver — ${esc(me.name)}</h1><p>${active.length} active · ${done} delivered today · you are at <strong>${here}</strong> ${statusChip(me.status)}</p></div>
-      <div class="pill-row">
-        <button class="btn ghost" data-status="break">Take a break</button>
-        <button class="btn ghost" data-status="available">Go available</button>
-        ${me.status !== 'available' ? `<button class="btn" data-position-start>${selectingPosition ? 'Cancel position selection' : 'Set position on map'}</button>` : ''}
-      </div>
+      <div><h1>Deliveries</h1><p>${active.length} active · ${done} delivered today · at <strong>${here}</strong> ${statusChip(me.status)}</p></div>
     </div>
-    <div class="card"><div class="card-head"><h2>Stores</h2><span class="muted">Join a store to receive its deliveries</span></div>${directory.flatMap((m) => m.stores.map((s) => {
-      const isJoined = joined.some((j) => j.id === s.id);
-      return `<div class="request-row"><span>${esc(m.name)} — ${esc(s.name)}</span>${isJoined ? '<span class="muted">Joined</span>' : `<button class="btn sm" data-store-request="${esc(s.id)}">Request to join</button>`}</div>`;
-    })).join('') || '<p class="muted">No stores available.</p>'}</div>
     <div class="grid2">
       <div>
         ${active.length ? active.map(card).join('') : '<div class="card"><p class="muted">No active deliveries. Sit tight — Dispatch will notify you.</p></div>'}
       </div>
-      <div class="card">
-        <div class="card-head"><h2>Your route</h2><span class="muted">you are the teal dot</span></div>
-        ${renderMap({ size: grid.size, roads: grid.roads, markers, paths, selectable: selectingPosition })}
-      </div>
+      ${mapCard(false)}
     </div>`;
 }
 
@@ -115,9 +129,10 @@ function card(d: DriverDelivery): string {
 
 function wire(el: HTMLElement): void {
   enableMapTooltips(el);
+  const repaint = () => renderDriver(el, null, currentPage);
   el.querySelector<HTMLButtonElement>('[data-position-start]')?.addEventListener('click', () => {
     selectingPosition = !selectingPosition;
-    renderDriver(el);
+    repaint();
   });
   const map = el.querySelector<HTMLElement>('[data-map-selectable="1"]');
   const svg = map?.querySelector<SVGSVGElement>('svg');
@@ -150,7 +165,7 @@ function wire(el: HTMLElement): void {
       await post('/driver/location', { lat: x, lng: y });
       selectingPosition = false;
       toast(`Position updated to (${x}, ${y})`);
-      renderDriver(el);
+      repaint();
     } catch (err) { toast(err instanceof ApiError ? err.message : 'Position update failed', 'error'); }
   });
   el.querySelectorAll<HTMLButtonElement>('[data-accept]').forEach((b) => b.addEventListener('click', () =>
@@ -161,11 +176,9 @@ function wire(el: HTMLElement): void {
     if (b.dataset.status === 'available') selectingPosition = false;
     run(() => post('/driver/status', { status: b.dataset.status }), `Status: ${b.dataset.status}`, el);
   }));
-  el.querySelectorAll<HTMLButtonElement>('[data-store-request]').forEach((b) => b.addEventListener('click', () =>
-    run(() => post('/driver/store-request', { storeId: b.dataset.storeRequest }), 'Join request sent', el)));
 }
 
 async function run(fn: () => Promise<unknown>, ok: string, el: HTMLElement): Promise<void> {
-  try { await fn(); toast(ok); renderDriver(el); }
+  try { await fn(); toast(ok); renderDriver(el, null, currentPage); }
   catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); }
 }

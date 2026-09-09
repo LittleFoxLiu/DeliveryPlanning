@@ -1,6 +1,6 @@
 import { q, q1, initDb, resetDb, closeDb } from './db.js';
 import { hashPassword } from './auth.js';
-import { users, merchants, stores, customers, drivers, orders, roads, traffic } from './repo.js';
+import { users, merchants, stores, customers, drivers, orders, roads, traffic, products } from './repo.js';
 import { buildRoadGrid } from './engine/routing.js';
 import { minutesFromNow } from './util.js';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +46,23 @@ export async function seed(opts: { reset?: boolean } = {}): Promise<void> {
   const bakery = await merchants.create('North Street Bakery');
   const bakeryStore = await stores.create({ merchantId: bakery.id, name: 'North Street Bakery — Flagship', pickupLat: 15, pickupLng: 5 });
 
+  const mkProduct = (merchantId: string, name: string, priceCents: number, packageSize: 'small' | 'medium' | 'large', description: string) =>
+    products.create({ merchantId, name, priceCents, packageSize, description });
+
+  const harborProducts = await Promise.all([
+    mkProduct(harbor.id, 'Fresh produce box', 2400, 'medium', 'Seasonal fruit & veg, ~4kg'),
+    mkProduct(harbor.id, 'Dairy pack', 900, 'small', 'Milk, butter, yoghurt'),
+    mkProduct(harbor.id, 'Pantry staples bundle', 1800, 'medium', 'Rice, pasta, canned goods'),
+    mkProduct(harbor.id, 'Sparkling water (12-pack)', 1100, 'large', 'Glass bottles, 12 × 330ml'),
+    mkProduct(harbor.id, 'Bag of coffee beans', 1500, 'small', 'Single-origin, 250g'),
+  ]);
+  const bakeryProducts = await Promise.all([
+    mkProduct(bakery.id, 'Sourdough loaf', 700, 'small', 'Naturally leavened, sliced on request'),
+    mkProduct(bakery.id, 'Almond croissant', 450, 'small', 'Filled with frangipane'),
+    mkProduct(bakery.id, 'Celebration cake', 3800, 'large', 'Serves 12, 24h notice ideal'),
+    mkProduct(bakery.id, 'Cinnamon roll (6-pack)', 1500, 'medium', 'Cream-cheese glaze'),
+  ]);
+
   const driverSpecs = [
     { name: 'Jordan Lee', vehicleType: 'van' as const, capacity: 4, maxPackageSize: 'large' as const, lat: 3, lng: 3, status: 'available' as const },
     { name: 'Priya Shah', vehicleType: 'car' as const, capacity: 3, maxPackageSize: 'medium' as const, lat: 16, lng: 15, status: 'available' as const },
@@ -66,23 +83,26 @@ export async function seed(opts: { reset?: boolean } = {}): Promise<void> {
   await mkUser('maya@demo.test', 'customer', 'Maya Chen', cust1.id);
   await mkUser('james@demo.test', 'customer', 'James Wu', cust2.id);
 
+  const line = (p: { id: string; name: string; price_cents: number }, qty: number) =>
+    ({ productId: p.id, name: p.name, qty, unitPriceCents: p.price_cents });
+
   await orders.create({
     merchant_id: harbor.id, store_id: harborStore.id, customer_id: cust1.id,
     pickup_lat: 10, pickup_lng: 10, delivery_lat: 17, delivery_lng: 3,
-    priority: 'express', deadline_ts: minutesFromNow(55), package_size: 'medium', volume: 2,
-    note: 'Leave at the front desk', items: [{ name: 'Fresh produce box', qty: 1 }, { name: 'Dairy pack', qty: 2 }],
+    priority: 'express', deadline_ts: minutesFromNow(55), package_size: 'medium', volume: 3,
+    note: 'Leave at the front desk', items: [line(harborProducts[0], 1), line(harborProducts[1], 2)],
   });
   await orders.create({
     merchant_id: harbor.id, store_id: harborStore.id, customer_id: cust2.id,
     pickup_lat: 10, pickup_lng: 10, delivery_lat: 4, delivery_lng: 16,
-    priority: 'standard', deadline_ts: minutesFromNow(120), package_size: 'small', volume: 1,
-    note: null, items: [{ name: 'Pantry staples', qty: 1 }],
+    priority: 'standard', deadline_ts: minutesFromNow(120), package_size: 'medium', volume: 1,
+    note: null, items: [line(harborProducts[2], 1)],
   });
   await orders.create({
     merchant_id: bakery.id, store_id: bakeryStore.id, customer_id: cust2.id,
     pickup_lat: 15, pickup_lng: 5, delivery_lat: 6, delivery_lng: 9,
-    priority: 'standard', deadline_ts: minutesFromNow(90), package_size: 'small', volume: 1,
-    note: 'Call on arrival', items: [{ name: 'Sourdough loaves', qty: 3 }],
+    priority: 'standard', deadline_ts: minutesFromNow(90), package_size: 'small', volume: 3,
+    note: 'Call on arrival', items: [line(bakeryProducts[0], 3)],
   });
 
   if (process.env.NODE_ENV !== 'test') {

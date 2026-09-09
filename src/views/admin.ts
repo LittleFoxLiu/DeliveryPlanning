@@ -25,14 +25,18 @@ const ROUTE_COLORS = ['#f26249', '#159c99', '#5277d7', '#9b6dd1', '#e0902a', '#3
 const itemText = (o: OrderDto) => o.items.map((it) => `${it.name}${it.qty > 1 ? ` ×${it.qty}` : ''}`).join(', ') || '—';
 let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
 let expanded = new Set<string>();
+let created: { kind: string; name: string; email: string; password: string }[] = [];
 
-export async function renderAdmin(el: HTMLElement): Promise<void> {
+let currentPage = 'overview';
+
+export async function renderAdmin(el: HTMLElement, _user: unknown, page = 'overview'): Promise<void> {
   resetSig('admin');
-  try { grid = await get('/meta/grid'); } catch { /* retry next poll */ }
+  currentPage = page;
+  if (!grid.roads.length) { try { grid = await get('/meta/grid'); } catch { /* retry next poll */ } }
   const draw = async () => {
     try {
       const [ov, membership] = await Promise.all([get<Overview>('/admin/overview'), get<Membership>('/admin/membership')]);
-      if (!changed('admin', { ov, membership, expanded: [...expanded] })) return;
+      if (!changed('admin', { ov, membership, page, expanded: [...expanded], created })) return;
       if (patchView(el, view(ov, membership))) wire(el, ov, membership); else resetSig('admin');
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) handleUnauthed();
@@ -43,6 +47,24 @@ export async function renderAdmin(el: HTMLElement): Promise<void> {
 }
 
 function view(ov: Overview, membership: Membership): string {
+  if (currentPage === 'orders') {
+    return `<div class="page-head"><div><h1>Orders</h1><p>Every order and the agent reasoning behind each assignment.</p></div></div>${ordersCard(ov)}`;
+  }
+  if (currentPage === 'fleet') {
+    return `<div class="page-head"><div><h1>Fleet</h1><p>Driver status, load, and position.</p></div></div>${fleetCard(ov)}`;
+  }
+  if (currentPage === 'network') {
+    return `<div class="page-head"><div><h1>Network</h1><p>Merchants, drivers, customers, and join requests.</p></div></div>
+      <div class="card">
+        <div class="card-head"><h2>Merchant join requests</h2><span class="muted">Invite code: <code>${esc(membership.inviteCode)}</code></span></div>
+        ${membership.requests.length ? membership.requests.map((r) => `<div class="request-row"><span>${esc(r.name)} · ${esc(r.email)}</span><span>${r.status === 'pending' ? `<button class="btn sm" data-join="${esc(r.id)}" data-accept="true">Accept</button> <button class="btn sm" data-join="${esc(r.id)}" data-accept="false">Reject</button>` : esc(r.status)}</span></div>`).join('') : '<p class="muted">Share the invite code with a merchant.</p>'}
+      </div>
+      ${addToNetworkCard()}`;
+  }
+  return overviewPage(ov);
+}
+
+function overviewPage(ov: Overview): string {
   const availableDrivers = ov.drivers.filter((d) => d.status === 'available').length;
   const activeDeliveries = ov.deliveries.filter((d) => d && !['delivered', 'cancelled', 'failed'].includes(d.status)).length;
 
@@ -108,30 +130,30 @@ function view(ov: Overview, membership: Membership): string {
         ${renderMap({ size: grid.size, roads: grid.roads, markers, paths })}
       </div>
       <div class="card">
-        <div class="card-head"><h2>Agent activity</h2></div>
+        <div class="card-head"><h2>Agent activity</h2><a class="muted" href="#/admin/orders">order details →</a></div>
         ${eventFeed(ov.events.map((e) => ({ agent: e.agent, message: e.message, ts: e.ts })))}
       </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head"><h2>Merchant join requests</h2><span class="muted">Invite code: <code>${esc(membership.inviteCode)}</code></span></div>
-      ${membership.requests.length ? membership.requests.map((r) => `<div class="request-row"><span>${esc(r.name)} · ${esc(r.email)}</span><span>${r.status === 'pending' ? `<button class="btn sm" data-join="${esc(r.id)}" data-accept="true">Accept</button> <button class="btn sm" data-join="${esc(r.id)}" data-accept="false">Reject</button>` : esc(r.status)}</span></div>`).join('') : '<p class="muted">Share the invite code with a merchant.</p>'}
-    </div>
-    <div class="card">
-      <div class="card-head"><h2>Active orders &amp; assignment reasoning</h2></div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Order</th><th>Customer</th><th>Status</th><th>Priority</th><th>Deadline</th><th>Assigned driver</th><th>ETA</th><th></th></tr></thead>
-        <tbody>${ov.orders.map((o) => orderRow(o, ov)).join('') || `<tr><td colspan="8" class="muted">No active orders. Have a merchant mark an order ready.</td></tr>`}</tbody>
-      </table></div>
-    </div>
-
-    <div class="card">
-      <div class="card-head"><h2>Fleet</h2></div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Driver</th><th>Vehicle</th><th>Status</th><th>Load</th><th>Position</th><th></th></tr></thead>
-        <tbody>${ov.drivers.map(driverRow).join('')}</tbody>
-      </table></div>
     </div>`;
+}
+
+function ordersCard(ov: Overview): string {
+  return `<div class="card">
+    <div class="card-head"><h2>${ov.orders.length} active order${ov.orders.length === 1 ? '' : 's'}</h2></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Order</th><th>Customer</th><th>Status</th><th>Priority</th><th>Deadline</th><th>Assigned driver</th><th>ETA</th><th></th></tr></thead>
+      <tbody>${ov.orders.map((o) => orderRow(o, ov)).join('') || `<tr><td colspan="8" class="muted">No active orders. Have a merchant mark an order ready.</td></tr>`}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function fleetCard(ov: Overview): string {
+  return `<div class="card">
+    <div class="card-head"><h2>${ov.drivers.length} drivers</h2></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Driver</th><th>Vehicle</th><th>Status</th><th>Load</th><th>Position</th><th></th></tr></thead>
+      <tbody>${ov.drivers.map(driverRow).join('')}</tbody>
+    </table></div>
+  </div>`;
 }
 
 function orderRow(o: OrderDto, ov: Overview): string {
@@ -163,6 +185,50 @@ function orderRow(o: OrderDto, ov: Overview): string {
     </td></tr>`;
 }
 
+function addToNetworkCard(): string {
+  const creds = created.length ? `
+    <div class="cred-box">
+      <div class="card-head"><h3 style="font-size:13px;margin:0">New sign-in accounts</h3><button class="btn sm ghost" data-act="clear-created">Clear</button></div>
+      <table><thead><tr><th>Role</th><th>Name</th><th>Email</th><th>Password</th></tr></thead>
+      <tbody>${created.map((c) => `<tr><td>${esc(c.kind)}</td><td>${esc(c.name)}</td><td><code>${esc(c.email)}</code></td><td><code>${esc(c.password)}</code></td></tr>`).join('')}</tbody></table>
+      <p class="muted">Shown once — copy the password now and hand it over.</p>
+    </div>` : '';
+  return `
+    <div class="card">
+      <div class="card-head"><h2>Add to network</h2><span class="muted">Each one gets a sign-in account</span></div>
+      ${creds}
+      <div class="grid3">
+        <form class="inline-form" id="add-merchant">
+          <h3 style="font-size:13px;margin:0">Merchant</h3>
+          <label>Business name<input name="businessName" required></label>
+          <label>Store name<input name="storeName" required></label>
+          <label>Store X<input name="storeLat" type="number" min="0" max="20" step="1" value="10" required></label>
+          <label>Store Y<input name="storeLng" type="number" min="0" max="20" step="1" value="10" required></label>
+          <label>Contact name<input name="contactName" required></label>
+          <label>Login email<input name="email" type="email" required></label>
+          <button class="btn primary full" type="submit">Add merchant</button>
+        </form>
+        <form class="inline-form" id="add-driver">
+          <h3 style="font-size:13px;margin:0">Driver</h3>
+          <label>Name<input name="name" required></label>
+          <label>Vehicle<select name="vehicleType"><option>car</option><option>bike</option><option>van</option><option>truck</option></select></label>
+          <label>Capacity<input name="capacity" type="number" min="1" max="20" value="4" required></label>
+          <label>Fits<select name="maxPackageSize"><option>large</option><option>medium</option><option>small</option></select></label>
+          <label>Start X<input name="lat" type="number" min="0" max="20" step="1" value="10" required></label>
+          <label>Start Y<input name="lng" type="number" min="0" max="20" step="1" value="10" required></label>
+          <label>Login email<input name="email" type="email" required></label>
+          <button class="btn primary full" type="submit">Add driver</button>
+        </form>
+        <form class="inline-form" id="add-customer">
+          <h3 style="font-size:13px;margin:0">Customer</h3>
+          <label>Name<input name="name" required></label>
+          <label>Login email<input name="email" type="email" required></label>
+          <button class="btn primary full" type="submit">Add customer</button>
+        </form>
+      </div>
+    </div>`;
+}
+
 function driverRow(d: DriverDto): string {
   return `<tr>
     <td><strong>${esc(d.name)}</strong></td>
@@ -176,17 +242,43 @@ function driverRow(d: DriverDto): string {
 
 function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   enableMapTooltips(el);
+  const repaint = () => renderAdmin(el, null, currentPage);
   el.querySelectorAll<HTMLButtonElement>('[data-toggle]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.toggle!;
     expanded.has(id) ? expanded.delete(id) : expanded.add(id);
     el.innerHTML = view(ov, membership); wire(el, ov, membership);
   }));
   el.querySelectorAll<HTMLButtonElement>('[data-join]').forEach((b) => b.addEventListener('click', () => act(() => post(`/admin/membership/${b.dataset.join}`, { accept: b.dataset.accept === 'true' }), 'Request updated')));
+
+  el.querySelector('[data-act="clear-created"]')?.addEventListener('click', () => { created = []; repaint(); });
+  const addForm = (id: string, path: string, kind: string, body: (fd: FormData) => Record<string, unknown>) => {
+    el.querySelector<HTMLFormElement>(`#${id}`)?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const form = e.currentTarget as HTMLFormElement;
+      const fd = new FormData(form);
+      try {
+        const res = await post<{ credentials: { email: string; password: string } }>(path, body(fd));
+        created.unshift({ kind, name: String(fd.get('name') || fd.get('contactName') || fd.get('businessName') || ''), ...res.credentials });
+        toast(`${kind} added`);
+        repaint();
+      } catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); }
+    });
+  };
+  addForm('add-merchant', '/admin/merchants', 'Merchant', (fd) => ({
+    businessName: fd.get('businessName'), storeName: fd.get('storeName'),
+    storeLat: Number(fd.get('storeLat')), storeLng: Number(fd.get('storeLng')),
+    contactName: fd.get('contactName'), email: fd.get('email'),
+  }));
+  addForm('add-driver', '/admin/drivers', 'Driver', (fd) => ({
+    name: fd.get('name'), vehicleType: fd.get('vehicleType'), capacity: Number(fd.get('capacity')),
+    maxPackageSize: fd.get('maxPackageSize'), lat: Number(fd.get('lat')), lng: Number(fd.get('lng')), email: fd.get('email'),
+  }));
+  addForm('add-customer', '/admin/customers', 'Customer', (fd) => ({ name: fd.get('name'), email: fd.get('email') }));
   el.querySelector('[data-act="tick"]')?.addEventListener('click', () => act(() => post('/sim/tick'), 'Advanced simulation one tick'));
   el.querySelector('[data-act="monitor"]')?.addEventListener('click', () => act(() => post('/admin/monitor/tick'), 'Monitoring cycle complete'));
   el.querySelector('[data-act="randomize-roads"]')?.addEventListener('click', async () => {
     await act(() => post('/admin/roads/randomize'), 'Every road segment received a randomized status');
-    renderAdmin(el);
+    repaint();
   });
   el.querySelector('[data-act="reset"]')?.addEventListener('click', () => {
     if (confirm('Reset all demo data?')) act(() => post('/sim/reset'), 'Demo reset');

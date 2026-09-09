@@ -27,6 +27,7 @@ export async function orderView(o: OrderRow) {
     createdAt: o.created_at,
     readyAt: o.ready_at,
     items,
+    itemsTotalCents: items.reduce((n, i) => n + i.qty * (i.unitPriceCents ?? 0), 0),
   };
 }
 

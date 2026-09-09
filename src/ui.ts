@@ -64,6 +64,12 @@ export function localDatetimeValue(msFromNow: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** Format integer cents as a currency string, e.g. 2400 → "$24.00". */
+export function money(cents: number | null | undefined): string {
+  const n = Number(cents) || 0;
+  return `$${(n / 100).toFixed(2)}`;
+}
+
 export function relTime(ts: string): string {
   const diff = Date.now() - parseTs(ts);
   if (!Number.isFinite(diff)) return '';
