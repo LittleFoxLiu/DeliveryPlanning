@@ -136,6 +136,21 @@ export async function initDb(): Promise<void> {
     backend = await makePglite();
   }
   await backend.exec(SCHEMA_SQL);
+  // PGlite versions used by older local databases can stop processing a large
+  // multi-statement script after the first DDL batch. Run the location
+  // migrations explicitly so role dashboards never query columns that have not
+  // yet been added to an existing database.
+  for (const migration of [
+    'ALTER TABLE stores ADD COLUMN IF NOT EXISTS address text',
+    'ALTER TABLE stores ADD COLUMN IF NOT EXISTS geo_lat double precision',
+    'ALTER TABLE stores ADD COLUMN IF NOT EXISTS geo_lng double precision',
+    'ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS address text',
+    'ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS geo_lat double precision',
+    'ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS geo_lng double precision',
+    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address text',
+    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_geo_lat double precision',
+    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_geo_lng double precision',
+  ]) await backend.raw.query(migration);
 }
 
 export function dbKind(): 'pglite' | 'postgres' {

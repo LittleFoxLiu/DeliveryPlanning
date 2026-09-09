@@ -54,9 +54,8 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
 
   if (role === 'merchant') {
     const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
-    const sx = coord(b, 'storeLat');
-    const sy = coord(b, 'storeLng');
-    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: sx, pickupLng: sy });
+    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress', 'storeGeoLat', 'storeGeoLng');
+    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: location.lat, pickupLng: location.lng, address: location.address, geoLat: location.geoLat, geoLng: location.geoLng });
     refId = merchant.id;
   } else if (role === 'customer') {
     refId = (await customers.create(name)).id;
@@ -69,6 +68,8 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
       lat: coord(b, 'lat'),
       lng: coord(b, 'lng'),
       status: 'available',
+      address: str(b, 'address', { optional: true, max: 300 }) || null,
+      geoLat: optionalNumber(b.geoLat), geoLng: optionalNumber(b.geoLng),
     });
     refId = created.id;
   }
@@ -147,13 +148,16 @@ api.post('/onboarding/role', authenticate(true), authLimiter, h(async (req, res)
   let refId = current.ref_id;
   if (role === 'merchant') {
     const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
-    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: coord(b, 'storeLat'), pickupLng: coord(b, 'storeLng') });
+    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress', 'storeGeoLat', 'storeGeoLng');
+    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: location.lat, pickupLng: location.lng, address: location.address, geoLat: location.geoLat, geoLng: location.geoLng });
     refId = merchant.id;
   } else if (role === 'driver') {
     const driver = await drivers.create({
       name: current.name, vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
       capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }), maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
       lat: coord(b, 'lat'), lng: coord(b, 'lng'), status: 'available',
+      address: str(b, 'address', { optional: true, max: 300 }) || null,
+      geoLat: optionalNumber(b.geoLat), geoLng: optionalNumber(b.geoLng),
     });
     refId = driver.id;
   } else if (role === 'customer') {
@@ -175,7 +179,7 @@ api.get('/directory/merchants', authenticate(true), h(async (_req, res) => {
     merchants: await Promise.all(list.map(async (m) => ({
       id: m.id,
       name: m.name,
-      stores: (await stores.byMerchant(m.id)).map((s) => ({ id: s.id, name: s.name, pickup: { x: s.pickup_lat, y: s.pickup_lng } })),
+      stores: (await stores.byMerchant(m.id)).map((s) => ({ id: s.id, name: s.name, address: s.address, pickup: { x: s.pickup_lat, y: s.pickup_lng, lat: s.geo_lat, lon: s.geo_lng } })),
     }))),
   });
 }));
@@ -209,7 +213,7 @@ async function orderWithDelivery(o: Parameters<typeof orderView>[0]) {
 const merchantOnly = [authenticate(true), requireRole('merchant')];
 
 api.get('/merchant/stores', ...merchantOnly, h(async (req, res) => {
-  res.json({ stores: (await stores.byMerchant(req.user!.refId!)).map((s) => ({ id: s.id, name: s.name, pickup: { x: s.pickup_lat, y: s.pickup_lng } })) });
+  res.json({ stores: (await stores.byMerchant(req.user!.refId!)).map((s) => ({ id: s.id, name: s.name, address: s.address, pickup: { x: s.pickup_lat, y: s.pickup_lng, lat: s.geo_lat, lon: s.geo_lng } })) });
 }));
 
 api.get('/merchant/orders', ...merchantOnly, h(async (req, res) => {
@@ -236,6 +240,9 @@ api.post('/merchant/orders', ...merchantOnly, h(async (req, res) => {
     pickup_lng: store.pickup_lng,
     delivery_lat: dest.lat,
     delivery_lng: dest.lng,
+    delivery_address: dest.address,
+    delivery_geo_lat: dest.geoLat,
+    delivery_geo_lng: dest.geoLng,
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
     package_size: resolved.packageSize,
@@ -364,6 +371,9 @@ api.post('/customer/orders', ...customerOnly, h(async (req, res) => {
     pickup_lng: store.pickup_lng,
     delivery_lat: dest.lat,
     delivery_lng: dest.lng,
+    delivery_address: dest.address,
+    delivery_geo_lat: dest.geoLat,
+    delivery_geo_lng: dest.geoLng,
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
     package_size: resolved.packageSize,
@@ -390,8 +400,8 @@ const driverOnly = [authenticate(true), requireRole('driver')];
 async function driverSelf(refId: string) {
   const me = await drivers.byId(refId);
   return me && me.lat != null
-    ? { location: { x: me.lat, y: me.lng }, status: me.status, name: me.name, vehicleType: me.vehicle_type }
-    : { location: null, status: me?.status ?? 'offline', name: me?.name ?? '', vehicleType: me?.vehicle_type ?? '' };
+    ? { location: { x: me.lat, y: me.lng }, geoLocation: me.geo_lat != null ? { lat: me.geo_lat, lon: me.geo_lng } : null, address: me.location_address, status: me.status, name: me.name, vehicleType: me.vehicle_type }
+    : { location: null, geoLocation: null, address: null, status: me?.status ?? 'offline', name: me?.name ?? '', vehicleType: me?.vehicle_type ?? '' };
 }
 
 api.get('/driver/deliveries', ...driverOnly, h(async (req, res) => {
@@ -408,8 +418,8 @@ api.get('/driver/deliveries', ...driverOnly, h(async (req, res) => {
           priority: o.priority, packageSize: o.package_size, deadlineTs: o.deadline_ts, note: o.note, items,
           customerName: cust?.name ?? 'Customer',
         },
-        pickup: { x: o.pickup_lat, y: o.pickup_lng, name: store?.name ?? 'Merchant' },
-        dropoff: { x: o.delivery_lat, y: o.delivery_lng },
+        pickup: { x: o.pickup_lat, y: o.pickup_lng, name: store?.name ?? 'Merchant', address: store?.address, lat: store?.geo_lat, lon: store?.geo_lng },
+        dropoff: { x: o.delivery_lat, y: o.delivery_lng, address: o.delivery_address, lat: o.delivery_geo_lat, lon: o.delivery_geo_lng },
         route: await activeRouteView(d.id),
       };
     })),
@@ -428,8 +438,8 @@ api.get('/driver/deliveries/:id', ...driverOnly, h(async (req, res) => {
       priority: o.priority, packageSize: o.package_size, volume: o.volume, deadlineTs: o.deadline_ts, note: o.note, items,
       customerName: cust?.name ?? 'Customer',
     },
-    pickup: { x: o.pickup_lat, y: o.pickup_lng, name: store?.name ?? 'Merchant' },
-    dropoff: { x: o.delivery_lat, y: o.delivery_lng },
+    pickup: { x: o.pickup_lat, y: o.pickup_lng, name: store?.name ?? 'Merchant', address: store?.address, lat: store?.geo_lat, lon: store?.geo_lng },
+    dropoff: { x: o.delivery_lat, y: o.delivery_lng, address: o.delivery_address, lat: o.delivery_geo_lat, lon: o.delivery_geo_lng },
     route: await activeRouteView(delivery.id),
   });
 }));
@@ -506,6 +516,8 @@ api.post('/admin/merchants', ...adminOnly, h(async (req, res) => {
     name: str(b, 'storeName', { min: 1, max: 120 }),
     pickupLat: coord(b, 'storeLat'),
     pickupLng: coord(b, 'storeLng'),
+    address: str(b, 'storeAddress', { optional: true, max: 300 }) || null,
+    geoLat: optionalNumber(b.storeGeoLat), geoLng: optionalNumber(b.storeGeoLng),
   });
   const contact = str(b, 'contactName', { min: 1, max: 120 });
   const credentials = await provisionUser(str(b, 'email', { max: 200 }), 'merchant', contact, merchant.id);
@@ -706,13 +718,36 @@ api.post('/sim/reset', ...simOnly, h(async (_req, res) => {
 /* --------------------------------------------------------------- helpers */
 /** Validate a delivery destination against the store's pickup point so the
  *  order can't be dispatched as a zero-distance no-op. */
-function deliveryPoint(b: Record<string, unknown>, store: { pickup_lat: number; pickup_lng: number }): { lat: number; lng: number } {
-  const lat = coord(b, 'deliveryLat');
-  const lng = coord(b, 'deliveryLng');
+function optionalNumber(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) throw badRequest('Geocoded coordinates must be finite numbers');
+  return n;
+}
+
+type LocationPoint = { lat: number; lng: number; address: string | null; geoLat: number | null; geoLng: number | null };
+function locationPoint(b: Record<string, unknown>, latKey: string, lngKey: string, addressKey: string, geoLatKey: string, geoLngKey: string): LocationPoint {
+  const geoLat = optionalNumber(b[geoLatKey]);
+  const geoLng = optionalNumber(b[geoLngKey]);
+  if ((geoLat === null) !== (geoLng === null) || (geoLat !== null && (geoLat < -90 || geoLat > 90 || geoLng! < -180 || geoLng! > 180))) {
+    throw badRequest('Both valid geocoded latitude and longitude are required');
+  }
+  const lat = b[latKey] === undefined && geoLat !== null ? gridFromGeo(geoLat, 1.22, 1.39) : coord(b, latKey);
+  const lng = b[lngKey] === undefined && geoLng !== null ? gridFromGeo(geoLng, 103.74, 104.02) : coord(b, lngKey);
+  return { lat, lng, address: str(b, addressKey, { optional: true, max: 300 }) || null, geoLat, geoLng };
+}
+
+function gridFromGeo(value: number, min: number, max: number): number {
+  return Math.max(0, Math.min(config.grid.size, Math.round(((value - min) / (max - min)) * config.grid.size)));
+}
+
+function deliveryPoint(b: Record<string, unknown>, store: { pickup_lat: number; pickup_lng: number }): LocationPoint {
+  const point = locationPoint(b, 'deliveryLat', 'deliveryLng', 'deliveryAddress', 'deliveryGeoLat', 'deliveryGeoLng');
+  const { lat, lng } = point;
   if (Math.abs(lat - store.pickup_lat) < 1 && Math.abs(lng - store.pickup_lng) < 1) {
     throw badRequest(`The delivery address (${lat}, ${lng}) is at the pickup location — choose a destination away from the store.`);
   }
-  return { lat, lng };
+  return point;
 }
 
 function parseItems(raw: unknown): { name: string; qty: number }[] {

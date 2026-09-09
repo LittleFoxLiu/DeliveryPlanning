@@ -4,6 +4,7 @@ import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDateti
 import { renderMap, enableMapTooltips, type MapMarker } from '../map';
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
 import type { RoadSeg, Point, ProductDto } from '../types';
+import { mountLocationMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
 
 interface Tracking {
   order: { id: string; status: string; priority: string; deadlineTs: string; dropoff: Point; items: { name: string; qty: number }[] };
@@ -28,6 +29,9 @@ let pickedStoreId: string | null = null;
 let catalog: ProductDto[] = [];
 let cart: Cart = {};
 const draft = { deliveryLat: 17, deliveryLng: 3, priority: 'standard', deadlineTs: '', note: '' };
+let deliveryGeo: GeoPoint | null = null;
+let deliveryRoute: GeoRoute | null = null;
+let deliveryAddress = '';
 let lastOrders: { id: string; status: string }[] = [];
 let lastTracking: Tracking | null = null;
 let currentPage = 'order';
@@ -178,12 +182,18 @@ function stepDelivery(): string {
   const soon = draft.deadlineTs || localDatetimeValue(80 * 60_000);
   return `
     <form class="inline-form" id="wiz-delivery">
-      <label>Deliver to X (0-20)<input name="deliveryLat" type="number" min="0" max="20" step="1" value="${draft.deliveryLat}" required></label>
-      <label>Deliver to Y (0-20)<input name="deliveryLng" type="number" min="0" max="20" step="1" value="${draft.deliveryLng}" required></label>
+      <label class="full">Delivery address<input id="delivery-search" placeholder="Type an address or search with Nominatim" autocomplete="off" value="${esc(deliveryGeo?.name || deliveryAddress)}"></label>
+      <button type="button" class="btn full" data-open-location-picker>Open map in a new window</button>
+      <div id="delivery-results" class="geo-results full"></div>
+      <div id="delivery-map" class="geo-map full"></div>
+      <p class="muted full geo-help">Click the map to drop your delivery pin. ${deliveryGeo ? `Selected: <strong>${esc(deliveryGeo.name)}</strong>` : 'No pin selected yet.'}</p>
+      <label>Grid X (legacy)<input name="deliveryLat" type="number" min="0" max="20" step="1" value="${draft.deliveryLat}" required></label>
+      <label>Grid Y (legacy)<input name="deliveryLng" type="number" min="0" max="20" step="1" value="${draft.deliveryLng}" required></label>
       <label>Priority<select name="priority"><option value="standard"${draft.priority === 'standard' ? ' selected' : ''}>standard</option><option value="express"${draft.priority === 'express' ? ' selected' : ''}>express</option></select></label>
       <label>Deadline<input name="deadlineTs" type="datetime-local" value="${esc(soon)}" required></label>
       <label class="full">Note <span class="muted">(optional)</span><input name="note" value="${esc(draft.note)}" placeholder="e.g. leave at the front desk"></label>
     </form>
+    ${deliveryRoute ? `<div class="route-preview full">OSRM driving estimate: <strong>${deliveryRoute.distanceKm.toFixed(1)} km · ${Math.round(deliveryRoute.durationMinutes)} min</strong></div>` : ''}
     <div class="pill-row" style="margin-top:12px">
       <button class="btn ghost" data-wiz-back>Back</button>
       <button class="btn primary" data-wiz-next>Review order</button>
@@ -227,13 +237,37 @@ function wire(el: HTMLElement): void {
   el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; repaint(el); }));
 
   el.querySelectorAll<HTMLButtonElement>('[data-pick-store]').forEach((b) => b.addEventListener('click', () => {
-    if (pickedStoreId !== b.dataset.pickStore) { cart = {}; }
+    if (pickedStoreId !== b.dataset.pickStore) { cart = {}; deliveryGeo = null; deliveryRoute = null; }
     pickedStoreId = b.dataset.pickStore!;
     pickedMerchantId = b.dataset.merchant!;
     repaint(el);
   }));
 
   el.querySelector<HTMLFormElement>('#wiz-delivery')?.addEventListener('submit', (e) => e.preventDefault());
+  const geoMap = el.querySelector<HTMLElement>('#delivery-map');
+  if (geoMap) {
+    const store = merchants.flatMap((m) => m.stores).find((s) => s.id === pickedStoreId)?.pickup;
+    const pickup = store ? gridToGeo(store.x, store.y) : null;
+    mountLocationMap(geoMap, deliveryGeo, async (point) => {
+      deliveryGeo = point;
+      deliveryRoute = pickup ? await routeWithOsrm(pickup, point).catch(() => null) : null;
+      draft.deliveryLat = geoToGrid(point.lat, 1.22, 1.39);
+      draft.deliveryLng = geoToGrid(point.lon, 103.74, 104.02);
+      repaint(el);
+    }, deliveryRoute);
+  }
+  const search = el.querySelector<HTMLInputElement>('#delivery-search');
+  const results = el.querySelector<HTMLElement>('#delivery-results');
+  let searchTimer: number | undefined;
+  search?.addEventListener('input', () => { deliveryAddress = search.value; deliveryGeo = null; deliveryRoute = null; window.clearTimeout(searchTimer); searchTimer = window.setTimeout(async () => {
+    if (!results) return; results.textContent = 'Searching Nominatim…';
+    try { const found = await searchNominatim(search.value); results.innerHTML = found.map((p) => `<button type="button" data-geo-result="${p.lat},${p.lon}">${esc(p.name)} <small>${esc(p.district || 'Singapore')}</small></button>`).join('') || '<span class="muted">No places found.</span>';
+      results.querySelectorAll<HTMLButtonElement>('[data-geo-result]').forEach((button, index) => button.addEventListener('click', () => { deliveryGeo = found[index]; deliveryAddress = found[index].name; deliveryRoute = null; repaint(el); }));
+    } catch { results.textContent = 'Address search unavailable.'; }
+  }, 500); });
+  el.querySelector<HTMLButtonElement>('[data-open-location-picker]')?.addEventListener('click', () => openLocationPicker(deliveryGeo, (point) => {
+    deliveryGeo = point; deliveryRoute = null; draft.deliveryLat = geoToGrid(point.lat, 1.22, 1.39); draft.deliveryLng = geoToGrid(point.lon, 103.74, 104.02); repaint(el);
+  }));
   wireCart(el, cart, () => repaint(el));
 
   el.querySelector<HTMLButtonElement>('[data-wiz-back]')?.addEventListener('click', () => {
@@ -256,6 +290,9 @@ function wire(el: HTMLElement): void {
         items: cartItems(cart),
         deliveryLat: draft.deliveryLat,
         deliveryLng: draft.deliveryLng,
+        deliveryAddress: deliveryGeo?.name || deliveryAddress || undefined,
+        deliveryGeoLat: deliveryGeo?.lat,
+        deliveryGeoLng: deliveryGeo?.lon,
         priority: draft.priority,
         note: draft.note || undefined,
         deadlineTs: new Date(draft.deadlineTs).toISOString(),
@@ -273,3 +310,6 @@ function wire(el: HTMLElement): void {
     }
   });
 }
+
+function gridToGeo(x: number, y: number): GeoPoint { return { lat: 1.22 + (y / 20) * .17, lon: 103.74 + (x / 20) * .28, name: 'Store pickup' }; }
+function geoToGrid(value: number, min: number, max: number): number { return Math.max(0, Math.min(20, Math.round(((value - min) / (max - min)) * 20))); }

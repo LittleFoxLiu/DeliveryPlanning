@@ -1,10 +1,11 @@
-import { roads, traffic, type OrderRow, type DeliveryRow } from '../repo.js';
+import { roads, traffic, stores, type OrderRow, type DeliveryRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
 import {
   calculateRoute, calculateEta, calculateDistance, estimateDeliveryTime, compareRoutes,
   type Point, type RouteResult, type DeliveryEstimate, type Segment,
 } from '../engine/routing.js';
 import type { Candidate } from './driverAgent.js';
+import { estimateGeoDelivery } from '../engine/geoRouting.js';
 
 const NAME = 'RoutingAgent';
 
@@ -51,10 +52,13 @@ export const routingAgent = {
     const segs: Segment[] = await roads.segments();
     const pickup: Point = { x: order.pickup_lat, y: order.pickup_lng };
     const dropoff: Point = { x: order.delivery_lat, y: order.delivery_lng };
-    const routed = candidates.map((candidate) => ({
+    const store = await stores.byId(order.store_id);
+    const routed = await Promise.all(candidates.map(async (candidate) => ({
       candidate,
-      estimate: estimateDeliveryTime({ x: candidate.location.lat, y: candidate.location.lng }, pickup, dropoff, segs),
-    }));
+      estimate: candidate.driver.geo_lat != null && candidate.driver.geo_lng != null && store?.geo_lat != null && store.geo_lng != null && order.delivery_geo_lat != null && order.delivery_geo_lng != null
+        ? await estimateGeoDelivery({ lat: candidate.driver.geo_lat, lon: candidate.driver.geo_lng }, { lat: store.geo_lat, lon: store.geo_lng }, { lat: order.delivery_geo_lat, lon: order.delivery_geo_lng })
+        : estimateDeliveryTime({ x: candidate.location.lat, y: candidate.location.lng }, pickup, dropoff, segs),
+    })));
 
     const comparison = compareRoutes(
       routed.filter((r) => r.estimate.reachable).map((r) => ({

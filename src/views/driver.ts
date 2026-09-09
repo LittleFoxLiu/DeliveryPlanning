@@ -3,14 +3,15 @@ import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, fmtTime, minutesUntil } from '../ui';
 import { renderMap, routeToPath, enableMapTooltips, type MapMarker, type MapPath } from '../map';
 import type { RoadSeg, Point } from '../types';
+import { mountLocationMap, type GeoPoint } from '../geoMap';
 
 interface DriverDelivery {
   id: string; status: string; etaTs: string | null; estimatedDeliveryMinutes: number | null;
   order: { code: string; priority: string; packageSize: string; deadlineTs: string; note: string | null; customerName: string; items: { name: string; qty: number }[] };
-  pickup: Point & { name?: string }; dropoff: Point;
+  pickup: Point & { name?: string; address?: string | null; lat?: number | null; lon?: number | null }; dropoff: Point & { address?: string | null; lat?: number | null; lon?: number | null };
   route: { path: { toPickup?: Point[]; toDropoff?: Point[] } } | null;
 }
-interface Me { location: Point | null; status: string; name: string; vehicleType: string }
+interface Me { location: Point | null; geoLocation?: { lat: number; lon: number } | null; address?: string | null; status: string; name: string; vehicleType: string }
 
 let grid: { size: number; roads: RoadSeg[] } = { size: 20, roads: [] };
 let selectingPosition = false;
@@ -64,12 +65,12 @@ function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
   const here = me.location ? `(${me.location.x}, ${me.location.y})` : 'unknown';
   const mapCard = (selectable: boolean) => `<div class="card">
     <div class="card-head"><h2>${selectable ? 'Your position' : 'Your route'}</h2><span class="muted">you are the teal dot</span></div>
-    ${renderMap({ size: grid.size, roads: grid.roads, markers, paths, selectable })}
+    ${selectable ? `<div id="driver-position-map" class="geo-map" data-driver-location="${me.location ? `${me.location.x},${me.location.y}` : ''}"></div><p class="muted geo-help">Click anywhere on the map to set your current position.</p>` : renderMap({ size: grid.size, roads: grid.roads, markers, paths })}
   </div>`;
 
   if (currentPage === 'account') {
     return `
-      <div class="page-head"><div><h1>Account</h1><p>You are at <strong>${here}</strong> ${statusChip(me.status)}</p></div></div>
+      <div class="page-head"><div><h1>Account</h1><p>You are at <strong>${esc(me.address || here)}</strong> ${statusChip(me.status)}</p></div></div>
       <div class="grid2">
         <div class="card">
           <div class="card-head"><h2>Availability</h2></div>
@@ -77,7 +78,7 @@ function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
             <dt>Name</dt><dd>${esc(me.name)}</dd>
             <dt>Vehicle</dt><dd>${esc(me.vehicleType)}</dd>
             <dt>Status</dt><dd>${statusChip(me.status)}</dd>
-            <dt>Position</dt><dd>${here}</dd>
+            <dt>Position</dt><dd>${esc(me.address || here)}${me.geoLocation ? ` <span class="muted">(${me.geoLocation.lat.toFixed(5)}, ${me.geoLocation.lon.toFixed(5)})</span>` : ''}</dd>
           </dl>
           <div class="pill-row" style="margin-top:12px">
             <button class="btn ghost" data-status="break">Take a break</button>
@@ -93,7 +94,7 @@ function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
 
   return `
     <div class="page-head">
-      <div><h1>Deliveries</h1><p>${active.length} active · ${done} delivered today · at <strong>${here}</strong> ${statusChip(me.status)}</p></div>
+      <div><h1>Deliveries</h1><p>${active.length} active · ${done} delivered today · at <strong>${esc(me.address || here)}</strong> ${statusChip(me.status)}</p></div>
     </div>
     <div class="grid2">
       <div>
@@ -115,8 +116,8 @@ function card(d: DriverDelivery): string {
     <div class="next-step">➜ ${d.status === 'en_route_pickup' ? 'Collecting at' : ['picked_up', 'en_route_drop'].includes(d.status) ? 'Delivering to' : 'Head to'} <strong>${esc(t.label)}</strong> — (${t.at.x}, ${t.at.y})</div>
     <dl class="kv" style="margin-top:10px">
       <dt>Customer</dt><dd>${esc(d.order.customerName)}</dd>
-      <dt>Pickup</dt><dd>${esc(d.pickup.name || 'Merchant')} — (${d.pickup.x}, ${d.pickup.y})</dd>
-      <dt>Drop-off</dt><dd>(${d.dropoff.x}, ${d.dropoff.y})</dd>
+      <dt>Pickup</dt><dd>${esc(d.pickup.name || 'Merchant')} — ${esc(d.pickup.address || `(${d.pickup.x}, ${d.pickup.y})`)}</dd>
+      <dt>Drop-off</dt><dd>${esc(d.dropoff.address || `(${d.dropoff.x}, ${d.dropoff.y})`)}</dd>
       <dt>Items</dt><dd>${d.order.items.map((i) => `${esc(i.name)}${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ') || '—'}</dd>
       <dt>Package</dt><dd>${esc(d.order.packageSize)} · ${esc(d.order.priority)}</dd>
       ${d.order.note ? `<dt>Note</dt><dd>${esc(d.order.note)}</dd>` : ''}
@@ -134,6 +135,18 @@ function wire(el: HTMLElement): void {
     selectingPosition = !selectingPosition;
     repaint();
   });
+  const positionMap = el.querySelector<HTMLElement>('#driver-position-map');
+  if (positionMap) {
+    const location = el.querySelector<HTMLElement>('[data-driver-location]');
+    const raw = location?.dataset.driverLocation?.split(',').map(Number);
+    const initial = raw && raw.length === 2 ? gridToGeo(raw[0], raw[1]) : null;
+    mountLocationMap(positionMap, initial, async (point) => {
+      const x = geoToGrid(point.lon, 103.74, 104.02);
+      const y = geoToGrid(point.lat, 1.22, 1.39);
+      try { await post('/driver/location', { lat: x, lng: y }); selectingPosition = false; toast(`Position updated to (${x}, ${y})`); repaint(); }
+      catch (err) { toast(err instanceof ApiError ? err.message : 'Position update failed', 'error'); }
+    });
+  }
   const map = el.querySelector<HTMLElement>('[data-map-selectable="1"]');
   const svg = map?.querySelector<SVGSVGElement>('svg');
   const pointForEvent = (event: MouseEvent): { x: number; y: number } | null => {
@@ -177,6 +190,9 @@ function wire(el: HTMLElement): void {
     run(() => post('/driver/status', { status: b.dataset.status }), `Status: ${b.dataset.status}`, el);
   }));
 }
+
+function gridToGeo(x: number, y: number): GeoPoint { return { lat: 1.22 + (y / 20) * .17, lon: 103.74 + (x / 20) * .28, name: 'Current position' }; }
+function geoToGrid(value: number, min: number, max: number): number { return Math.max(0, Math.min(20, Math.round(((value - min) / (max - min)) * 20))); }
 
 async function run(fn: () => Promise<unknown>, ok: string, el: HTMLElement): Promise<void> {
   try { await fn(); toast(ok); renderDriver(el, null, currentPage); }

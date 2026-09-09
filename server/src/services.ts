@@ -130,12 +130,20 @@ export function injectTraffic(input: {
    *  the surrounding block (usually blows the deadline → reassignment). */
   severity?: 'minor' | 'major';
 }): Promise<TrafficChange> {
-  const status = input.status ?? 'closed';
+  // With no explicit target, create a small reproducible demo incident rather
+  // than touching the whole network. This makes the traffic feature useful
+  // from a console/API smoke test as well as from the active-route button.
+  const status = input.status ?? (input.severity ? 'closed' : 'heavy');
   const delay = input.delayMinutes ?? (status === 'heavy' ? 12 : status === 'moderate' ? 5 : 0);
   const changed: string[] = [];
 
   return tx(async () => {
     let segmentIds = input.segments ?? [];
+
+    if (!input.blockRouteOf && segmentIds.length === 0) {
+      const candidates = (await roads.all()).filter((road) => road.status !== 'closed');
+      segmentIds = candidates.sort(() => Math.random() - 0.5).slice(0, Math.min(3, candidates.length)).map((road) => road.id);
+    }
 
     if (input.blockRouteOf) {
       const order = await orders.byId(input.blockRouteOf);

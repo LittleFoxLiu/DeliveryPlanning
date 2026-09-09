@@ -70,12 +70,12 @@ export const merchants = {
   list() { return q<{ id: string; name: string }>(`SELECT * FROM merchants ORDER BY name`); },
 };
 
-export interface StoreRow { id: string; merchant_id: string; name: string; pickup_lat: number; pickup_lng: number }
+export interface StoreRow { id: string; merchant_id: string; name: string; pickup_lat: number; pickup_lng: number; address: string | null; geo_lat: number | null; geo_lng: number | null }
 export const stores = {
-  async create(input: { merchantId: string; name: string; pickupLat: number; pickupLng: number }) {
+  async create(input: { merchantId: string; name: string; pickupLat: number; pickupLng: number; address?: string | null; geoLat?: number | null; geoLng?: number | null }) {
     const sid = id('sto');
-    await q(`INSERT INTO stores (id, merchant_id, name, pickup_lat, pickup_lng) VALUES (?,?,?,?,?)`,
-      [sid, input.merchantId, input.name, input.pickupLat, input.pickupLng]);
+    await q(`INSERT INTO stores (id, merchant_id, name, pickup_lat, pickup_lng, address, geo_lat, geo_lng) VALUES (?,?,?,?,?,?,?,?)`,
+      [sid, input.merchantId, input.name, input.pickupLat, input.pickupLng, input.address ?? null, input.geoLat ?? null, input.geoLng ?? null]);
     return { id: sid, ...input };
   },
   byId(sid: string) { return q1<StoreRow>(`SELECT * FROM stores WHERE id = ?`, [sid]); },
@@ -117,26 +117,27 @@ export const products = {
 export interface DriverRow { id: string; name: string; vehicle_type: 'bike' | 'car' | 'van' | 'truck'; capacity: number; max_package_size: 'small' | 'medium' | 'large' }
 type DriverAvailability = 'available' | 'on_route' | 'break' | 'offline';
 export interface DriverFull extends DriverRow {
-  status: DriverAvailability; current_order_count: number; lat: number | null; lng: number | null; location_at: string | null;
+  status: DriverAvailability; current_order_count: number; lat: number | null; lng: number | null; location_at: string | null; geo_lat: number | null; geo_lng: number | null; location_address: string | null;
 }
 
 const DRIVER_SELECT = `
   SELECT d.*, s.status, s.current_order_count,
-         loc.lat AS lat, loc.lng AS lng, loc.recorded_at AS location_at
+         loc.lat AS lat, loc.lng AS lng, loc.recorded_at AS location_at,
+         loc.geo_lat, loc.geo_lng, loc.address AS location_address
   FROM drivers d
   JOIN driver_status s ON s.driver_id = d.id
   LEFT JOIN LATERAL (
-    SELECT lat, lng, recorded_at FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1
+    SELECT lat, lng, recorded_at, geo_lat, geo_lng, address FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1
   ) loc ON true`;
 
 export const drivers = {
-  async create(input: { name: string; vehicleType: DriverRow['vehicle_type']; capacity: number; maxPackageSize: DriverRow['max_package_size']; lat: number; lng: number; status?: DriverAvailability }) {
+  async create(input: { name: string; vehicleType: DriverRow['vehicle_type']; capacity: number; maxPackageSize: DriverRow['max_package_size']; lat: number; lng: number; status?: DriverAvailability; address?: string | null; geoLat?: number | null; geoLng?: number | null }) {
     const did = id('drv');
     await tx(async () => {
       await q(`INSERT INTO drivers (id, name, vehicle_type, capacity, max_package_size) VALUES (?,?,?,?,?)`,
         [did, input.name, input.vehicleType, input.capacity, input.maxPackageSize]);
       await q(`INSERT INTO driver_status (driver_id, status, current_order_count) VALUES (?, ?, 0)`, [did, input.status ?? 'available']);
-      await q(`INSERT INTO driver_locations (driver_id, lat, lng) VALUES (?, ?, ?)`, [did, input.lat, input.lng]);
+      await q(`INSERT INTO driver_locations (driver_id, lat, lng, address, geo_lat, geo_lng) VALUES (?, ?, ?, ?, ?, ?)`, [did, input.lat, input.lng, input.address ?? null, input.geoLat ?? null, input.geoLng ?? null]);
     });
     return { id: did };
   },
@@ -158,6 +159,7 @@ export const drivers = {
 export interface OrderRow {
   id: string; merchant_id: string; store_id: string; customer_id: string;
   pickup_lat: number; pickup_lng: number; delivery_lat: number; delivery_lng: number;
+  delivery_address?: string | null; delivery_geo_lat?: number | null; delivery_geo_lng?: number | null;
   status: OrderStatus; priority: 'standard' | 'express'; deadline_ts: string;
   package_size: 'small' | 'medium' | 'large'; volume: number; note: string | null;
   created_at: string; ready_at: string | null;
@@ -170,10 +172,11 @@ export const orders = {
     const oid = id('ord');
     await tx(async () => {
       await q(`
-        INSERT INTO orders (id, merchant_id, store_id, customer_id, pickup_lat, pickup_lng, delivery_lat, delivery_lng, status, priority, deadline_ts, package_size, volume, note)
-        VALUES (?,?,?,?,?,?,?,?, 'created', ?,?,?,?,?)`,
+        INSERT INTO orders (id, merchant_id, store_id, customer_id, pickup_lat, pickup_lng, delivery_lat, delivery_lng, delivery_address, delivery_geo_lat, delivery_geo_lng, status, priority, deadline_ts, package_size, volume, note)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?, 'created', ?,?,?,?,?)`,
         [oid, input.merchant_id, input.store_id, input.customer_id, input.pickup_lat, input.pickup_lng,
-          input.delivery_lat, input.delivery_lng, input.priority, input.deadline_ts, input.package_size, input.volume, input.note ?? null]);
+          input.delivery_lat, input.delivery_lng, input.delivery_address ?? null, input.delivery_geo_lat ?? null, input.delivery_geo_lng ?? null,
+          input.priority, input.deadline_ts, input.package_size, input.volume, input.note ?? null]);
       for (const item of input.items ?? []) {
         await q(`INSERT INTO order_items (order_id, product_id, name, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?)`,
           [oid, item.productId ?? null, item.name, item.qty, item.unitPriceCents ?? 0]);

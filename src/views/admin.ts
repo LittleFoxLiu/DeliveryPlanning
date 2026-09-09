@@ -3,6 +3,7 @@ import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil } from '../ui';
 import { renderMap, routeToPath, enableMapTooltips, type MapMarker, type MapPath } from '../map';
+import { mountOverviewMap } from '../geoMap';
 import { renderAdminOps } from './adminOps';
 import { renderAdminEval } from './adminEval';
 
@@ -131,7 +132,7 @@ function overviewPage(ov: Overview): string {
     <div class="grid2">
       <div class="card">
         <div class="card-head"><h2>Network map</h2><span class="muted">${grid.roads.filter((r) => r.status !== 'clear').length} congested segments</span></div>
-        ${renderMap({ size: grid.size, roads: grid.roads, markers, paths })}
+        <div id="admin-overview-map" class="geo-map overview-map"></div>
       </div>
       <div class="card">
         <div class="card-head"><h2>Agent activity</h2><a class="muted" href="#/admin/orders">order details →</a></div>
@@ -248,6 +249,17 @@ function driverRow(d: DriverDto): string {
 
 function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   enableMapTooltips(el);
+  const overviewMap = el.querySelector<HTMLElement>('#admin-overview-map');
+  if (overviewMap) {
+    const toGeo = (x: number, y: number) => ({ lat: 1.22 + (y / 20) * .17, lon: 103.74 + (x / 20) * .28 });
+    const points: Array<{ lat: number; lon: number; name: string; kind: string; detail?: string }> = [];
+    ov.drivers.forEach((d) => { if (d.location) points.push({ ...(d.geoLocation || toGeo(d.location.x, d.location.y)), name: d.name, kind: 'Driver', detail: `${d.status} · ${d.currentOrderCount}/${d.capacity}` }); });
+    ov.orders.forEach((o) => {
+      points.push({ ...(o.pickup.lat != null && o.pickup.lon != null ? { lat: o.pickup.lat, lon: o.pickup.lon } : toGeo(o.pickup.x, o.pickup.y)), name: o.storeName || 'Merchant pickup', kind: 'Pickup', detail: o.pickup.address || o.code });
+      points.push({ ...(o.dropoff.lat != null && o.dropoff.lon != null ? { lat: o.dropoff.lat, lon: o.dropoff.lon } : toGeo(o.dropoff.x, o.dropoff.y)), name: o.customerName, kind: 'Drop-off', detail: o.dropoff.address || `${o.code} · ${o.status}` });
+    });
+    mountOverviewMap(overviewMap, points);
+  }
   const repaint = () => renderAdmin(el, null, currentPage);
   el.querySelectorAll<HTMLButtonElement>('[data-toggle]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.toggle!;

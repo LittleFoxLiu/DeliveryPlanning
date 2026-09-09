@@ -39,6 +39,13 @@ code { background: #eef0f4; padding: 1px 5px; border-radius: 5px; font-size: .9e
 .google-btn { display:block; text-align:center; text-decoration:none; }
 .request-row { display:flex; justify-content:space-between; gap:12px; padding:9px 0; border-top:1px solid var(--line); align-items:center; }
 .map-selectable .grid-map { cursor: crosshair; outline: 2px dashed var(--accent); outline-offset: -2px; }
+.geo-map { min-height: 300px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.overview-map { min-height: 520px; }
+.geo-results { display: grid; gap: 4px; }
+.geo-results button { text-align: left; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); cursor: pointer; }
+.geo-results small { color: var(--muted); }
+.geo-help { margin: 0; }
+.route-preview { padding: 9px 11px; background: #e0f2f1; color: #0f7a77; border-radius: 8px; }
 .road-sim-btn { background: #e0a52f; border-color: #e0a52f; color: #fff; }
 .road-sim-btn:hover { background: #c88c18; border-color: #c88c18; }
 

@@ -20,7 +20,7 @@ export interface ProductDto {
 
 export interface OrderDto {
   id: string; code: string; status: string; priority: string; packageSize: string; volume: number;
-  deadlineTs: string; note: string | null; pickup: Point; dropoff: Point;
+  deadlineTs: string; note: string | null; pickup: Point & { lat?: number | null; lon?: number | null; address?: string | null }; dropoff: Point & { lat?: number | null; lon?: number | null; address?: string | null };
   merchantId?: string; storeId?: string; storeName?: string | null;
   customerId?: string; customerName: string;
   items: OrderItem[]; itemsTotalCents?: number; createdAt?: string; readyAt?: string | null;
@@ -41,5 +41,5 @@ export interface RouteDto {
 
 export interface DriverDto {
   id: string; name: string; vehicleType: string; capacity: number; maxPackageSize: string;
-  status: string; currentOrderCount: number; location: Point | null; locationAt: string | null;
+  status: string; currentOrderCount: number; location: Point | null; geoLocation?: { lat: number; lon: number; address?: string | null } | null; locationAt: string | null;
 }

@@ -24,8 +24,8 @@ export async function orderView(o: OrderRow) {
     volume: o.volume,
     deadlineTs: o.deadline_ts,
     note: o.note,
-    pickup: { x: o.pickup_lat, y: o.pickup_lng },
-    dropoff: { x: o.delivery_lat, y: o.delivery_lng },
+    pickup: { x: o.pickup_lat, y: o.pickup_lng, lat: store?.geo_lat, lon: store?.geo_lng, address: store?.address },
+    dropoff: { x: o.delivery_lat, y: o.delivery_lng, lat: o.delivery_geo_lat, lon: o.delivery_geo_lng, address: o.delivery_address },
     createdAt: o.created_at,
     readyAt: o.ready_at,
     items,
@@ -75,6 +75,7 @@ export function driverAdminView(d: DriverFull) {
     status: d.status,
     currentOrderCount: d.current_order_count,
     location: d.lat != null ? { x: d.lat, y: d.lng } : null,
+    geoLocation: d.geo_lat != null ? { lat: d.geo_lat, lon: d.geo_lng, address: d.location_address } : null,
     locationAt: d.location_at,
   };
 }

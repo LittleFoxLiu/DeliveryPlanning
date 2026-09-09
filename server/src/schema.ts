@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS stores (
   name text NOT NULL,
   pickup_lat double precision NOT NULL,
   pickup_lng double precision NOT NULL,
+  address text,
+  geo_lat double precision,
+  geo_lng double precision,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -54,6 +57,9 @@ CREATE TABLE IF NOT EXISTS driver_locations (
   driver_id text NOT NULL REFERENCES drivers(id),
   lat double precision NOT NULL,
   lng double precision NOT NULL,
+  address text,
+  geo_lat double precision,
+  geo_lng double precision,
   recorded_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_driver_locations_driver ON driver_locations(driver_id, id DESC);
@@ -89,6 +95,9 @@ CREATE TABLE IF NOT EXISTS orders (
   pickup_lng double precision NOT NULL,
   delivery_lat double precision NOT NULL,
   delivery_lng double precision NOT NULL,
+  delivery_address text,
+  delivery_geo_lat double precision,
+  delivery_geo_lng double precision,
   status text NOT NULL DEFAULT 'created'
     CHECK (status IN ('created','ready','validated','dispatching','assigned','picked_up','delivering','delivered','cancelled','failed')),
   priority text NOT NULL DEFAULT 'standard' CHECK (priority IN ('standard','express')),
@@ -199,6 +208,9 @@ CREATE TABLE IF NOT EXISTS agent_events (
   message text NOT NULL,
   data_json jsonb
 );
+-- Additive migration must run before indexes reference the new column. This is
+-- important for existing PGlite/Supabase databases created by older versions.
+ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS run_id text;
 CREATE INDEX IF NOT EXISTS idx_agent_events_order ON agent_events(order_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_events_id ON agent_events(id DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(run_id, id);
@@ -242,7 +254,15 @@ CREATE INDEX IF NOT EXISTS idx_agent_escalations_status ON agent_escalations(sta
 -- Additive migrations (safe to re-run against an existing database).
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS product_id text REFERENCES products(id);
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_price_cents integer NOT NULL DEFAULT 0;
-ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS run_id text;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS address text;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS geo_lat double precision;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS geo_lng double precision;
+ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS address text;
+ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS geo_lat double precision;
+ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS geo_lng double precision;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_geo_lat double precision;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_geo_lng double precision;
 `;
 
 /** Tables in dependency order (parents first) — used for TRUNCATE in tests. */

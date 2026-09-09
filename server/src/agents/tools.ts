@@ -5,6 +5,7 @@
  */
 import { orders, drivers, deliveries, stores, customers, merchants, roads } from '../repo.js';
 import { estimateDeliveryTime, calculateRoute, type Point } from '../engine/routing.js';
+import { estimateGeoDelivery } from '../engine/geoRouting.js';
 import { scoreDriver, compareAssignments, type ScoreBreakdown } from '../engine/scoring.js';
 import { driverAgent } from './driverAgent.js';
 import { orderAgent } from './orderAgent.js';
@@ -120,7 +121,10 @@ export const tEstimateDelivery = defineTool({
     const [d, o, segs] = await Promise.all([drivers.byId(driverId), orders.byId(orderId), roads.segments()]);
     if (!d || d.lat == null) throw new Error('driver_position_unknown');
     if (!o) throw new Error('order_not_found');
-    const est = estimateDeliveryTime(
+    const store = await stores.byId(o.store_id);
+    const est = d.geo_lat != null && d.geo_lng != null && store?.geo_lat != null && store.geo_lng != null && o.delivery_geo_lat != null && o.delivery_geo_lng != null
+      ? await estimateGeoDelivery({ lat: d.geo_lat, lon: d.geo_lng }, { lat: store.geo_lat, lon: store.geo_lng }, { lat: o.delivery_geo_lat, lon: o.delivery_geo_lng })
+      : estimateDeliveryTime(
       { x: d.lat, y: d.lng as number },
       { x: o.pickup_lat, y: o.pickup_lng }, { x: o.delivery_lat, y: o.delivery_lng }, segs,
     );
@@ -178,10 +182,13 @@ export const tScoreCandidates = defineTool({
     for (const { driverId } of candidates) {
       const d = byId.get(driverId);
       if (!d || d.lat == null) continue;
-      const est = estimateDeliveryTime(
-        { x: d.lat, y: d.lng as number },
-        { x: order.pickup_lat, y: order.pickup_lng }, { x: order.delivery_lat, y: order.delivery_lng }, segs,
-      );
+      const store = await stores.byId(order.store_id);
+      const est = d.geo_lat != null && d.geo_lng != null && store?.geo_lat != null && store.geo_lng != null && order.delivery_geo_lat != null && order.delivery_geo_lng != null
+        ? await estimateGeoDelivery({ lat: d.geo_lat, lon: d.geo_lng }, { lat: store.geo_lat, lon: store.geo_lng }, { lat: order.delivery_geo_lat, lon: order.delivery_geo_lng })
+        : estimateDeliveryTime(
+          { x: d.lat, y: d.lng as number },
+          { x: order.pickup_lat, y: order.pickup_lng }, { x: order.delivery_lat, y: order.delivery_lng }, segs,
+        );
       const breakdown = scoreDriver(
         { orderId: order.id, packageSize: order.package_size, volume: order.volume, priority: order.priority, deadlineTs: order.deadline_ts },
         { driverId: d.id, name: d.name, status: d.status, vehicleType: d.vehicle_type, maxPackageSize: d.max_package_size, capacity: d.capacity, currentOrderCount: d.current_order_count },
