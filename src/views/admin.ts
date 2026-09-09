@@ -19,6 +19,7 @@ interface Reasoning {
   explanation: string[]; rationale: string;
   rejected: { driverId: string; disqualifiers: string[] }[];
 }
+interface Membership { inviteCode: string; requests: { id: string; email: string; name: string; status: string }[] }
 
 const ROUTE_COLORS = ['#f26249', '#159c99', '#5277d7', '#9b6dd1', '#e0902a', '#3f9d6b'];
 const itemText = (o: OrderDto) => o.items.map((it) => `${it.name}${it.qty > 1 ? ` ×${it.qty}` : ''}`).join(', ') || '—';
@@ -30,9 +31,9 @@ export async function renderAdmin(el: HTMLElement): Promise<void> {
   try { grid = await get('/meta/grid'); } catch { /* retry next poll */ }
   const draw = async () => {
     try {
-      const ov = await get<Overview>('/admin/overview');
-      if (!changed('admin', { ov, expanded: [...expanded] })) return;
-      if (patchView(el, view(ov))) wire(el, ov); else resetSig('admin');
+      const [ov, membership] = await Promise.all([get<Overview>('/admin/overview'), get<Membership>('/admin/membership')]);
+      if (!changed('admin', { ov, membership, expanded: [...expanded] })) return;
+      if (patchView(el, view(ov, membership))) wire(el, ov, membership); else resetSig('admin');
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) handleUnauthed();
     }
@@ -41,7 +42,7 @@ export async function renderAdmin(el: HTMLElement): Promise<void> {
   poll(draw, 3500);
 }
 
-function view(ov: Overview): string {
+function view(ov: Overview, membership: Membership): string {
   const availableDrivers = ov.drivers.filter((d) => d.status === 'available').length;
   const activeDeliveries = ov.deliveries.filter((d) => d && !['delivered', 'cancelled', 'failed'].includes(d.status)).length;
 
@@ -89,6 +90,7 @@ function view(ov: Overview): string {
       <div class="pill-row">
         <button class="btn primary" data-act="tick">▶ Simulate tick</button>
         <button class="btn" data-act="monitor">Run monitoring</button>
+        <button class="btn road-sim-btn" data-act="randomize-roads">Simulate road status</button>
         <button class="btn ghost" data-act="reset">Reset demo</button>
       </div>
     </div>
@@ -111,6 +113,10 @@ function view(ov: Overview): string {
       </div>
     </div>
 
+    <div class="card">
+      <div class="card-head"><h2>Merchant join requests</h2><span class="muted">Invite code: <code>${esc(membership.inviteCode)}</code></span></div>
+      ${membership.requests.length ? membership.requests.map((r) => `<div class="request-row"><span>${esc(r.name)} · ${esc(r.email)}</span><span>${r.status === 'pending' ? `<button class="btn sm" data-join="${esc(r.id)}" data-accept="true">Accept</button> <button class="btn sm" data-join="${esc(r.id)}" data-accept="false">Reject</button>` : esc(r.status)}</span></div>`).join('') : '<p class="muted">Share the invite code with a merchant.</p>'}
+    </div>
     <div class="card">
       <div class="card-head"><h2>Active orders &amp; assignment reasoning</h2></div>
       <div class="table-wrap"><table>
@@ -168,15 +174,20 @@ function driverRow(d: DriverDto): string {
   </tr>`;
 }
 
-function wire(el: HTMLElement, ov: Overview): void {
+function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   enableMapTooltips(el);
   el.querySelectorAll<HTMLButtonElement>('[data-toggle]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.toggle!;
     expanded.has(id) ? expanded.delete(id) : expanded.add(id);
-    el.innerHTML = view(ov); wire(el, ov);
+    el.innerHTML = view(ov, membership); wire(el, ov, membership);
   }));
+  el.querySelectorAll<HTMLButtonElement>('[data-join]').forEach((b) => b.addEventListener('click', () => act(() => post(`/admin/membership/${b.dataset.join}`, { accept: b.dataset.accept === 'true' }), 'Request updated')));
   el.querySelector('[data-act="tick"]')?.addEventListener('click', () => act(() => post('/sim/tick'), 'Advanced simulation one tick'));
   el.querySelector('[data-act="monitor"]')?.addEventListener('click', () => act(() => post('/admin/monitor/tick'), 'Monitoring cycle complete'));
+  el.querySelector('[data-act="randomize-roads"]')?.addEventListener('click', async () => {
+    await act(() => post('/admin/roads/randomize'), 'Every road segment received a randomized status');
+    renderAdmin(el);
+  });
   el.querySelector('[data-act="reset"]')?.addEventListener('click', () => {
     if (confirm('Reset all demo data?')) act(() => post('/sim/reset'), 'Demo reset');
   });

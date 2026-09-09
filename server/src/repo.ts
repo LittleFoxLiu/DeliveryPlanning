@@ -21,6 +21,61 @@ export const users = {
   byId(uid: string) {
     return q1<UserRow>(`SELECT id, email, role, name, ref_id FROM users WHERE id = ?`, [uid]);
   },
+  async setRole(uid: string, role: UserRow['role'], refId: string | null) {
+    return q1<UserRow>(`UPDATE users SET role = ?, ref_id = ? WHERE id = ? RETURNING id, email, role, name, ref_id`, [role, refId, uid]);
+  },
+};
+
+export const memberships = {
+  async inviteForAdmin(adminId: string) {
+    const existing = await q1<{ invite_code: string }>('SELECT invite_code FROM admin_invites WHERE admin_id = ?', [adminId]);
+    if (existing) return existing.invite_code;
+    const code = `ADMIN-${id('code').replace(/^code_/, '').slice(0, 8).toUpperCase()}`;
+    await q('INSERT INTO admin_invites (admin_id, invite_code) VALUES (?, ?)', [adminId, code]);
+    return code;
+  },
+  async requestMerchantAdmin(userId: string, code: string) {
+    const invite = await q1<{ admin_id: string }>('SELECT admin_id FROM admin_invites WHERE invite_code = ?', [code.toUpperCase()]);
+    if (!invite) throw new Error('Invalid admin invite code');
+    const existing = await q1<{ id: string }>(`SELECT id FROM join_requests WHERE requester_user_id = ? AND kind = 'merchant_admin' AND target_admin_id = ? AND status = 'pending'`, [userId, invite.admin_id]);
+    if (existing) return existing.id;
+    const rid = id('req');
+    await q('INSERT INTO join_requests (id, requester_user_id, kind, target_admin_id) VALUES (?, ?, \'merchant_admin\', ?)', [rid, userId, invite.admin_id]);
+    return rid;
+  },
+  async requestDriverStore(userId: string, storeId: string) {
+    const existing = await q1<{ id: string }>(`SELECT id FROM join_requests WHERE requester_user_id = ? AND kind = 'driver_store' AND target_store_id = ? AND status = 'pending'`, [userId, storeId]);
+    if (existing) return existing.id;
+    const rid = id('req');
+    await q('INSERT INTO join_requests (id, requester_user_id, kind, target_store_id) VALUES (?, ?, \'driver_store\', ?)', [rid, userId, storeId]);
+    return rid;
+  },
+  adminRequests(adminId: string) {
+    return q(`SELECT r.id, r.status, r.created_at, u.id AS requester_id, u.email, u.name FROM join_requests r JOIN users u ON u.id = r.requester_user_id WHERE r.kind = 'merchant_admin' AND r.target_admin_id = ? ORDER BY r.created_at DESC`, [adminId]);
+  },
+  merchantRequests(merchantId: string) {
+    return q(`SELECT r.id, r.status, r.created_at, u.id AS requester_id, u.email, u.name, s.id AS store_id, s.name AS store_name FROM join_requests r JOIN users u ON u.id = r.requester_user_id JOIN stores s ON s.id = r.target_store_id WHERE r.kind = 'driver_store' AND s.merchant_id = ? ORDER BY r.created_at DESC`, [merchantId]);
+  },
+  async decideAdminRequest(adminId: string, requestId: string, accept: boolean) {
+    const r = await q1<{ id: string; requester_user_id: string; target_admin_id: string | null }>(`SELECT id, requester_user_id, target_admin_id FROM join_requests WHERE id = ? AND kind = 'merchant_admin' AND status = 'pending'`, [requestId]);
+    if (!r || r.target_admin_id !== adminId) throw new Error('Join request not found');
+    await tx(async () => {
+      await q(`UPDATE join_requests SET status = ?, decided_at = ? WHERE id = ?`, [accept ? 'accepted' : 'rejected', nowIso(), requestId]);
+      if (accept) {
+        const merchant = await q1<{ ref_id: string | null }>(`SELECT ref_id FROM users WHERE id = ? AND role = 'merchant'`, [r.requester_user_id]);
+        if (merchant?.ref_id) await q(`INSERT INTO merchant_admins (merchant_id, admin_id) VALUES (?, ?) ON CONFLICT (merchant_id) DO UPDATE SET admin_id = excluded.admin_id`, [merchant.ref_id, adminId]);
+      }
+    });
+  },
+  async decideDriverRequest(merchantId: string, requestId: string, accept: boolean) {
+    const r = await q1<{ id: string; requester_user_id: string; target_store_id: string | null }>(`SELECT r.id, r.requester_user_id, r.target_store_id FROM join_requests r JOIN stores s ON s.id = r.target_store_id WHERE r.id = ? AND r.kind = 'driver_store' AND r.status = 'pending' AND s.merchant_id = ?`, [requestId, merchantId]);
+    if (!r || !r.target_store_id) throw new Error('Join request not found');
+    await tx(async () => {
+      await q(`UPDATE join_requests SET status = ?, decided_at = ? WHERE id = ?`, [accept ? 'accepted' : 'rejected', nowIso(), requestId]);
+      if (accept) await q(`INSERT INTO driver_stores (driver_id, store_id) SELECT ref_id, ? FROM users WHERE id = ? AND role = 'driver' ON CONFLICT DO NOTHING`, [r.target_store_id, r.requester_user_id]);
+    });
+  },
+  storesForDriver(driverId: string) { return q<{ id: string; name: string; merchant_name: string }>(`SELECT s.id, s.name, m.name AS merchant_name FROM driver_stores ds JOIN stores s ON s.id = ds.store_id JOIN merchants m ON m.id = s.merchant_id WHERE ds.driver_id = ? ORDER BY m.name, s.name`, [driverId]); },
 };
 
 /* -------------------------------------------------------------- merchants */
