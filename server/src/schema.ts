@@ -22,11 +22,10 @@ CREATE TABLE IF NOT EXISTS stores (
   id text PRIMARY KEY,
   merchant_id text NOT NULL REFERENCES merchants(id),
   name text NOT NULL,
-  pickup_lat double precision NOT NULL,
-  pickup_lng double precision NOT NULL,
-  address text,
-  geo_lat double precision,
-  geo_lng double precision,
+  latitude double precision NOT NULL,
+  longitude double precision NOT NULL,
+  address text NOT NULL,
+  CONSTRAINT stores_singapore_bounds CHECK (latitude BETWEEN 1.22 AND 1.48 AND longitude BETWEEN 103.60 AND 104.05),
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -55,11 +54,10 @@ CREATE TABLE IF NOT EXISTS driver_status (
 CREATE TABLE IF NOT EXISTS driver_locations (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   driver_id text NOT NULL REFERENCES drivers(id),
-  lat double precision NOT NULL,
-  lng double precision NOT NULL,
+  latitude double precision NOT NULL,
+  longitude double precision NOT NULL,
   address text,
-  geo_lat double precision,
-  geo_lng double precision,
+  CONSTRAINT driver_locations_singapore_bounds CHECK (latitude BETWEEN 1.22 AND 1.48 AND longitude BETWEEN 103.60 AND 104.05),
   recorded_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_driver_locations_driver ON driver_locations(driver_id, id DESC);
@@ -91,13 +89,13 @@ CREATE TABLE IF NOT EXISTS orders (
   merchant_id text NOT NULL REFERENCES merchants(id),
   store_id text NOT NULL REFERENCES stores(id),
   customer_id text NOT NULL REFERENCES customers(id),
-  pickup_lat double precision NOT NULL,
-  pickup_lng double precision NOT NULL,
-  delivery_lat double precision NOT NULL,
-  delivery_lng double precision NOT NULL,
-  delivery_address text,
-  delivery_geo_lat double precision,
-  delivery_geo_lng double precision,
+  pickup_latitude double precision NOT NULL,
+  pickup_longitude double precision NOT NULL,
+  delivery_latitude double precision NOT NULL,
+  delivery_longitude double precision NOT NULL,
+  delivery_address text NOT NULL,
+  CONSTRAINT orders_pickup_singapore_bounds CHECK (pickup_latitude BETWEEN 1.22 AND 1.48 AND pickup_longitude BETWEEN 103.60 AND 104.05),
+  CONSTRAINT orders_delivery_singapore_bounds CHECK (delivery_latitude BETWEEN 1.22 AND 1.48 AND delivery_longitude BETWEEN 103.60 AND 104.05),
   status text NOT NULL DEFAULT 'created'
     CHECK (status IN ('created','ready','validated','dispatching','assigned','picked_up','delivering','delivered','cancelled','failed')),
   priority text NOT NULL DEFAULT 'standard' CHECK (priority IN ('standard','express')),
@@ -153,13 +151,13 @@ CREATE TABLE IF NOT EXISTS routes (
   id text PRIMARY KEY,
   delivery_id text NOT NULL REFERENCES deliveries(id),
   driver_id text NOT NULL REFERENCES drivers(id),
-  origin_lat double precision NOT NULL,
-  origin_lng double precision NOT NULL,
+  origin_latitude double precision NOT NULL,
+  origin_longitude double precision NOT NULL,
+  CONSTRAINT routes_singapore_bounds CHECK (origin_latitude BETWEEN 1.22 AND 1.48 AND origin_longitude BETWEEN 103.60 AND 104.05),
   legs_json jsonb NOT NULL,
   path_json jsonb NOT NULL,
   distance_km double precision NOT NULL,
   eta_minutes double precision NOT NULL,
-  traffic_penalty_minutes double precision NOT NULL DEFAULT 0,
   active integer NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -176,24 +174,6 @@ CREATE TABLE IF NOT EXISTS assignments (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_assignments_order ON assignments(order_id, status);
-
-CREATE TABLE IF NOT EXISTS road_segments (
-  id text PRIMARY KEY,
-  ax integer NOT NULL, ay integer NOT NULL,
-  bx integer NOT NULL, by integer NOT NULL,
-  status text NOT NULL DEFAULT 'clear' CHECK (status IN ('clear','moderate','heavy','closed')),
-  delay_minutes double precision NOT NULL DEFAULT 0,
-  updated_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS traffic_conditions (
-  id text PRIMARY KEY,
-  area text NOT NULL,
-  status text NOT NULL CHECK (status IN ('clear','moderate','heavy')),
-  delay_minutes double precision NOT NULL DEFAULT 0,
-  source text,
-  updated_at timestamptz NOT NULL DEFAULT now()
-);
 
 CREATE TABLE IF NOT EXISTS agent_events (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -251,18 +231,10 @@ CREATE TABLE IF NOT EXISTS agent_escalations (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_escalations_status ON agent_escalations(status, created_at DESC);
 
--- Additive migrations (safe to re-run against an existing database).
+-- Additive migrations for the current schema (safe to re-run against a fresh
+-- database; legacy-coordinate cleanup is handled by initDb before queries run).
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS product_id text REFERENCES products(id);
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_price_cents integer NOT NULL DEFAULT 0;
-ALTER TABLE stores ADD COLUMN IF NOT EXISTS address text;
-ALTER TABLE stores ADD COLUMN IF NOT EXISTS geo_lat double precision;
-ALTER TABLE stores ADD COLUMN IF NOT EXISTS geo_lng double precision;
-ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS address text;
-ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS geo_lat double precision;
-ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS geo_lng double precision;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address text;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_geo_lat double precision;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_geo_lng double precision;
 `;
 
 /** Tables in dependency order (parents first) — used for TRUNCATE in tests. */
@@ -271,5 +243,5 @@ export const TABLES = [
   'agent_escalations', 'agent_runs', 'agent_events',
   'assignments', 'routes', 'deliveries', 'order_items', 'orders', 'products',
   'driver_locations', 'driver_status', 'drivers', 'customers', 'stores', 'merchants',
-  'road_segments', 'traffic_conditions', 'users',
+  'users',
 ];

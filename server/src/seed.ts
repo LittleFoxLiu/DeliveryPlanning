@@ -30,14 +30,6 @@ const VALID_SINGAPORE_LOCATIONS: SeedLocation[] = [
   { address: '1 Sengkang Square, Singapore 545078', lat: 1.3916, lon: 103.8957 },
 ];
 
-function compatibilityCoordinate(value: number, min: number, max: number): number {
-  return Math.max(0, Math.min(20, Math.round(((value - min) / (max - min)) * 20)));
-}
-
-function legacyPoint(location: SeedLocation): { lat: number; lng: number } {
-  return { lat: compatibilityCoordinate(location.lat, 1.22, 1.39), lng: compatibilityCoordinate(location.lon, 103.74, 104.02) };
-}
-
 function randomLocations(count: number): SeedLocation[] {
   return [...VALID_SINGAPORE_LOCATIONS]
     .sort(() => Math.random() - 0.5)
@@ -63,17 +55,15 @@ export async function seed(opts: { reset?: boolean } = {}): Promise<void> {
     return;
   }
 
-  // Real geo locations are the seed source of truth. The compatibility grid
-  // values below are generated from these coordinates only for old columns.
+  // These are Singapore addresses and coordinates returned by Nominatim. They
+  // are stored directly; the seed never creates synthetic positions.
   const locations = randomLocations(10);
   const [harborLocation, bakeryLocation, ...driverLocations] = locations;
 
   const harbor = await merchants.create('Harbor Grocery Co.');
-  const harborGrid = legacyPoint(harborLocation);
-  const harborStore = await stores.create({ merchantId: harbor.id, name: 'Harbor Grocery', pickupLat: harborGrid.lat, pickupLng: harborGrid.lng, address: harborLocation.address, geoLat: harborLocation.lat, geoLng: harborLocation.lon });
+  const harborStore = await stores.create({ merchantId: harbor.id, name: 'Harbor Grocery', latitude: harborLocation.lat, longitude: harborLocation.lon, address: harborLocation.address });
   const bakery = await merchants.create('North Street Bakery');
-  const bakeryGrid = legacyPoint(bakeryLocation);
-  const bakeryStore = await stores.create({ merchantId: bakery.id, name: 'North Street Bakery', pickupLat: bakeryGrid.lat, pickupLng: bakeryGrid.lng, address: bakeryLocation.address, geoLat: bakeryLocation.lat, geoLng: bakeryLocation.lon });
+  const bakeryStore = await stores.create({ merchantId: bakery.id, name: 'North Street Bakery', latitude: bakeryLocation.lat, longitude: bakeryLocation.lon, address: bakeryLocation.address });
 
   const mkProduct = (merchantId: string, name: string, priceCents: number, packageSize: 'small' | 'medium' | 'large', description: string) =>
     products.create({ merchantId, name, priceCents, packageSize, description });
@@ -97,7 +87,7 @@ export async function seed(opts: { reset?: boolean } = {}): Promise<void> {
       name: ['Jordan Lee', 'Priya Shah', 'Marco Silva', 'Hana Ito', 'Diego Torres'][i],
       vehicleType: ['van', 'car', 'van', 'bike', 'truck'][i] as 'van' | 'car' | 'bike' | 'truck',
       capacity: [4, 3, 5, 2, 6][i], maxPackageSize: ['large', 'medium', 'large', 'small', 'large'][i] as 'small' | 'medium' | 'large',
-      ...legacyPoint(location), status: (i === 4 ? 'break' : 'available') as 'available' | 'break', address: location.address, geoLat: location.lat, geoLng: location.lon,
+      latitude: location.lat, longitude: location.lon, status: (i === 4 ? 'break' : 'available') as 'available' | 'break', address: location.address,
     })),
   ];
   for (let i = 0; i < driverSpecs.length; i++) {
@@ -118,19 +108,19 @@ export async function seed(opts: { reset?: boolean } = {}): Promise<void> {
 
   await orders.create({
     merchant_id: harbor.id, store_id: harborStore.id, customer_id: cust1.id,
-    pickup_lat: harborGrid.lat, pickup_lng: harborGrid.lng, ...(() => { const p = legacyPoint(locations[7]); return { delivery_lat: p.lat, delivery_lng: p.lng }; })(), delivery_address: locations[7].address, delivery_geo_lat: locations[7].lat, delivery_geo_lng: locations[7].lon,
+    pickup_latitude: harborLocation.lat, pickup_longitude: harborLocation.lon, delivery_latitude: locations[7].lat, delivery_longitude: locations[7].lon, delivery_address: locations[7].address,
     priority: 'express', deadline_ts: minutesFromNow(55), package_size: 'medium', volume: 3,
     note: 'Leave at the front desk', items: [line(harborProducts[0], 1), line(harborProducts[1], 2)],
   });
   await orders.create({
     merchant_id: harbor.id, store_id: harborStore.id, customer_id: cust2.id,
-    pickup_lat: harborGrid.lat, pickup_lng: harborGrid.lng, ...(() => { const p = legacyPoint(locations[8]); return { delivery_lat: p.lat, delivery_lng: p.lng }; })(), delivery_address: locations[8].address, delivery_geo_lat: locations[8].lat, delivery_geo_lng: locations[8].lon,
+    pickup_latitude: harborLocation.lat, pickup_longitude: harborLocation.lon, delivery_latitude: locations[8].lat, delivery_longitude: locations[8].lon, delivery_address: locations[8].address,
     priority: 'standard', deadline_ts: minutesFromNow(120), package_size: 'medium', volume: 1,
     note: null, items: [line(harborProducts[2], 1)],
   });
   await orders.create({
     merchant_id: bakery.id, store_id: bakeryStore.id, customer_id: cust2.id,
-    pickup_lat: bakeryGrid.lat, pickup_lng: bakeryGrid.lng, ...(() => { const p = legacyPoint(locations[9]); return { delivery_lat: p.lat, delivery_lng: p.lng }; })(), delivery_address: locations[9].address, delivery_geo_lat: locations[9].lat, delivery_geo_lng: locations[9].lon,
+    pickup_latitude: bakeryLocation.lat, pickup_longitude: bakeryLocation.lon, delivery_latitude: locations[9].lat, delivery_longitude: locations[9].lon, delivery_address: locations[9].address,
     priority: 'standard', deadline_ts: minutesFromNow(90), package_size: 'small', volume: 3,
     note: 'Call on arrival', items: [line(bakeryProducts[0], 3)],
   });
@@ -146,7 +136,7 @@ async function mkUser(email: string, role: 'admin' | 'merchant' | 'driver' | 'cu
   await users.create({ email, passwordHash: hash, passwordSalt: salt, role, name, refId });
 }
 
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+const isMain = process.argv[1] && typeof import.meta.url === 'string' && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
 if (isMain) {
   seed({ reset: process.argv.includes('--reset') })
     .then(() => { console.log('[seed] done'); return closeDb(); })

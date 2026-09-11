@@ -6,7 +6,7 @@ import { routingAgent } from './routingAgent.js';
 import { dispatchTools, type DispatchDecision } from './dispatchAgent.js';
 import { monitoringAgent, type Finding } from './monitoringAgent.js';
 import { adviseRemediation } from './llm.js';
-import type { Point } from '../engine/routing.js';
+import type { GeoPoint } from '../geo.js';
 import { runDispatchLoop } from './dispatchLoop.js';
 import {
   createRun, checkpoint, finishRun, setRisk, setDecision, createEscalation,
@@ -222,7 +222,7 @@ export const coordinator = {
     const order = (await orders.byId(finding.orderId))!;
     const delivery = (await deliveries.byId(finding.deliveryId))!;
     const driver = (await drivers.byId(delivery.driver_id!))!;
-    const pos: Point = { x: driver.lat as number, y: driver.lng as number };
+    const pos: GeoPoint = { lat: driver.latitude as number, lon: driver.longitude as number };
     const runId = run?.id;
     await emitAgentEvent({
       runId, cycleId, agent: NAME, eventType: 'reroute_requested', orderId: order.id, deliveryId: delivery.id,
@@ -257,18 +257,27 @@ export const coordinator = {
     }
 
     const newEtaTs = minutesFromNow(result.etaMinutes);
+    const dropoffRoute = result.dropoffRoute;
+    const totalDistanceKm = result.route!.distanceKm + (dropoffRoute?.distanceKm ?? 0);
+    const routePath = finding.phase === 'to_pickup'
+      ? { toPickup: result.route!.path, toDropoff: dropoffRoute!.path }
+      : { toDropoff: result.route!.path };
+    const routeLegs = finding.phase === 'to_pickup'
+      ? {
+        toPickup: { etaMinutes: result.route!.etaMinutes, distanceKm: result.route!.distanceKm },
+        handlingMinutes: 3,
+        toDropoff: { etaMinutes: dropoffRoute!.etaMinutes, distanceKm: dropoffRoute!.distanceKm },
+      }
+      : { toDropoff: { etaMinutes: result.route!.etaMinutes, distanceKm: result.route!.distanceKm } };
     await routes.create({
       deliveryId: delivery.id,
       driverId: delivery.driver_id!,
-      originLat: pos.x,
-      originLng: pos.y,
-      legs: finding.phase === 'to_pickup'
-        ? { toPickup: { etaMinutes: result.route!.etaMinutes, distanceKm: result.route!.distanceKm } }
-        : { toDropoff: { etaMinutes: result.route!.etaMinutes, distanceKm: result.route!.distanceKm } },
-      path: finding.phase === 'to_pickup' ? { toPickup: result.route!.path } : { toDropoff: result.route!.path },
-      distanceKm: result.route!.distanceKm,
+      originLat: pos.lat,
+      originLng: pos.lon,
+      legs: routeLegs,
+      path: routePath,
+      distanceKm: totalDistanceKm,
       etaMinutes: result.etaMinutes,
-      trafficPenalty: result.route!.trafficPenaltyMinutes,
     });
     await deliveries.update(delivery.id, { eta_ts: newEtaTs, estimated_delivery_minutes: result.etaMinutes });
 

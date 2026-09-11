@@ -4,7 +4,7 @@ import {
   orders, drivers, deliveries, merchants, stores, customers,
 } from '../repo.js';
 import { minutesFromNow } from '../util.js';
-import { simulateTick, injectTraffic } from '../services.js';
+import { simulateTick } from '../services.js';
 import { coordinator } from '../agents/coordinator.js';
 import { baselineDispatch } from './baseline.js';
 import { SCENARIOS, runScenario } from './scenarios.js';
@@ -45,21 +45,23 @@ export function evalRunning(): boolean { return running; }
 
 /* -------------------------------------------------- comparison scenario set */
 
-interface CompareCtx { merchantId: string; storeId: string; pickup: { lat: number; lng: number } }
+interface CompareCtx { merchantId: string; storeId: string; pickup: { lat: number; lon: number } }
 
 async function freshCompareWorld(): Promise<CompareCtx> {
   await resetDb();
   await seed({ reset: true });
   const m = (await merchants.list())[0];
   const s = (await stores.byMerchant(m.id))[0];
-  return { merchantId: m.id, storeId: s.id, pickup: { lat: s.pickup_lat, lng: s.pickup_lng } };
+  return { merchantId: m.id, storeId: s.id, pickup: { lat: s.latitude, lon: s.longitude } };
 }
 
-async function mkOrder(ctx: CompareCtx, lat: number, lng: number, deadlineMin: number, priority: 'standard' | 'express' = 'standard'): Promise<string> {
+async function mkOrder(ctx: CompareCtx, lat: number, lon: number, deadlineMin: number, priority: 'standard' | 'express' = 'standard'): Promise<string> {
   const c = await customers.create('Compare Customer');
   const o = await orders.create({
     merchant_id: ctx.merchantId, store_id: ctx.storeId, customer_id: c.id,
-    pickup_lat: ctx.pickup.lat, pickup_lng: ctx.pickup.lng, delivery_lat: lat, delivery_lng: lng,
+    pickup_latitude: ctx.pickup.lat, pickup_longitude: ctx.pickup.lon,
+    delivery_latitude: lat, delivery_longitude: lon,
+    delivery_address: `Singapore (${lat.toFixed(6)}, ${lon.toFixed(6)})`,
     priority, deadline_ts: minutesFromNow(deadlineMin), package_size: 'small', volume: 1, note: null,
   });
   await orders.setStatus(o.id, 'ready', 'created');
@@ -72,7 +74,7 @@ const COMPARE_CASES: { name: string; run: (ctx: CompareCtx, mode: Mode) => Promi
   {
     name: 'Standard delivery',
     run: async (ctx, mode) => {
-      const id = await mkOrder(ctx, 18, 17, 120);
+      const id = await mkOrder(ctx, 1.4368, 103.7865, 120);
       if (mode === 'autonomous') await coordinator.dispatchOrder(id); else await baselineDispatch(id);
       for (let i = 0; i < 45; i++) await simulateTick({ monitor: mode === 'autonomous' });
       return [id];
@@ -81,7 +83,7 @@ const COMPARE_CASES: { name: string; run: (ctx: CompareCtx, mode: Mode) => Promi
   {
     name: 'Express delivery',
     run: async (ctx, mode) => {
-      const id = await mkOrder(ctx, 6, 14, 70, 'express');
+      const id = await mkOrder(ctx, 1.3526, 103.9442, 70, 'express');
       if (mode === 'autonomous') await coordinator.dispatchOrder(id); else await baselineDispatch(id);
       for (let i = 0; i < 45; i++) await simulateTick({ monitor: mode === 'autonomous' });
       return [id];
@@ -90,23 +92,12 @@ const COMPARE_CASES: { name: string; run: (ctx: CompareCtx, mode: Mode) => Promi
   {
     name: 'Driver drops out mid-delivery',
     run: async (ctx, mode) => {
-      const id = await mkOrder(ctx, 18, 17, 120);
+      const id = await mkOrder(ctx, 1.4368, 103.7865, 120);
       let first: string | undefined;
       if (mode === 'autonomous') first = (await coordinator.dispatchOrder(id)).decision?.driverId;
       else first = (await baselineDispatch(id)).driverId;
       await simulateTick({ monitor: mode === 'autonomous' });
       if (first) await drivers.setStatus(first, 'offline');
-      for (let i = 0; i < 40; i++) await simulateTick({ monitor: mode === 'autonomous' });
-      return [id];
-    },
-  },
-  {
-    name: 'Road closure on the route',
-    run: async (ctx, mode) => {
-      const id = await mkOrder(ctx, 18, 17, 120);
-      if (mode === 'autonomous') await coordinator.dispatchOrder(id); else await baselineDispatch(id);
-      await simulateTick({ monitor: mode === 'autonomous' });
-      try { await injectTraffic({ blockRouteOf: id, severity: 'major' }); } catch { /* no route yet */ }
       for (let i = 0; i < 40; i++) await simulateTick({ monitor: mode === 'autonomous' });
       return [id];
     },

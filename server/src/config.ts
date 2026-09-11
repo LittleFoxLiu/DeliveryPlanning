@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { SINGAPORE_BOUNDS } from './geo.js';
 
 // Load .env files for the server (tsx/node don't do this automatically).
 // Skipped under tests, which inject their own env and must never touch a real DB.
@@ -89,10 +90,11 @@ export const config = {
   tokenTtlSeconds: 60 * 60 * 12,
   // Monitoring loop cadence. 0 disables the background loop (tests / manual mode).
   monitorIntervalMs: Number(process.env.MONITOR_INTERVAL_MS ?? 0),
+  routingUrl: (process.env.ROUTING_URL?.trim() || 'https://router.project-osrm.org/route/v1/driving').replace(/\/$/, ''),
   // Optional LLM reasoning layer. Provider auto-selected from env; disabled when
   // neither is configured (the app stays fully deterministic).
   llm: resolveLlm(),
-  grid: { size: 20, segmentBaseMinutes: 2, kmPerSegment: 0.5 },
+  singapore: SINGAPORE_BOUNDS,
   rateLimit: {
     windowMs: 60_000,
     max: Number(process.env.RATE_LIMIT_MAX ?? 120),

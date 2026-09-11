@@ -74,8 +74,8 @@ export const dispatchTools = {
       const route = await routes.create({
         deliveryId: delivery.id,
         driverId: input.driverId,
-        originLat: driver.lat as number,
-        originLng: driver.lng as number,
+        originLat: driver.latitude as number,
+        originLng: driver.longitude as number,
         legs: {
           toPickup: { etaMinutes: est.toPickup.etaMinutes, distanceKm: est.toPickup.distanceKm },
           handlingMinutes: est.handlingMinutes,
@@ -84,7 +84,6 @@ export const dispatchTools = {
         path: { toPickup: est.toPickup.path, toDropoff: est.toDropoff.path },
         distanceKm: est.totalDistanceKm,
         etaMinutes: est.totalMinutes,
-        trafficPenalty: Number((est.toPickup.trafficPenaltyMinutes + est.toDropoff.trafficPenaltyMinutes).toFixed(1)),
       });
 
       await deliveries.setStatus(

@@ -31,8 +31,8 @@ and the browser client.
 
 - Every request body goes through `validation.ts`: typed field extraction,
   length caps, enum whitelists.
-- Coordinates are validated as finite numbers within `[0, gridSize]` — client
-  coordinates are never trusted.
+- Coordinates are validated as finite latitude/longitude values within the
+  Singapore bounds — client coordinates are never trusted.
 - Deadlines must be in the (near) future and within a sane horizon.
 - Path id params must match `^[a-z]+_[a-z0-9]{6,40}$` — SQLi/IDOR probes like
   `' OR 1=1--` are rejected with 400 before any lookup.

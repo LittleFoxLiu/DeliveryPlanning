@@ -107,7 +107,7 @@ export async function adviseRemediation(ctx: AdvisoryContext): Promise<Advisory>
         order: ctx.orderId, issues: ctx.issues, minutesBehindSchedule: ctx.slipMin, willMissDeadline: ctx.missesDeadline,
         alternativeDriverIfReassigned: ctx.alternativeDriver ?? null,
       },
-      guidance: 'reroute keeps the current driver on a fresh path; choose it for recoverable traffic. '
+      guidance: 'reroute keeps the current driver on a fresh OSRM path; choose it when the current route has changed. '
         + 'reassign hands the order to another driver; choose it when the driver is unavailable or a reroute cannot beat the deadline and an alternative can.',
     }),
     (v) => {

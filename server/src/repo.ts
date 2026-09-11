@@ -1,7 +1,7 @@
 import { q, q1, tx } from './db.js';
 import { id, nowIso } from './util.js';
 import { assertOrderTransition, assertDeliveryTransition, type OrderStatus, type DeliveryStatus } from './engine/stateMachine.js';
-import type { Segment } from './engine/routing.js';
+import type { GeoPoint } from './geo.js';
 
 const inList = (n: number) => Array.from({ length: n }, () => '?').join(', ');
 
@@ -70,12 +70,12 @@ export const merchants = {
   list() { return q<{ id: string; name: string }>(`SELECT * FROM merchants ORDER BY name`); },
 };
 
-export interface StoreRow { id: string; merchant_id: string; name: string; pickup_lat: number; pickup_lng: number; address: string | null; geo_lat: number | null; geo_lng: number | null }
+export interface StoreRow { id: string; merchant_id: string; name: string; latitude: number; longitude: number; address: string }
 export const stores = {
-  async create(input: { merchantId: string; name: string; pickupLat: number; pickupLng: number; address?: string | null; geoLat?: number | null; geoLng?: number | null }) {
+  async create(input: { merchantId: string; name: string; latitude: number; longitude: number; address: string }) {
     const sid = id('sto');
-    await q(`INSERT INTO stores (id, merchant_id, name, pickup_lat, pickup_lng, address, geo_lat, geo_lng) VALUES (?,?,?,?,?,?,?,?)`,
-      [sid, input.merchantId, input.name, input.pickupLat, input.pickupLng, input.address ?? null, input.geoLat ?? null, input.geoLng ?? null]);
+    await q(`INSERT INTO stores (id, merchant_id, name, latitude, longitude, address) VALUES (?,?,?,?,?,?)`,
+      [sid, input.merchantId, input.name, input.latitude, input.longitude, input.address]);
     return { id: sid, ...input };
   },
   byId(sid: string) { return q1<StoreRow>(`SELECT * FROM stores WHERE id = ?`, [sid]); },
@@ -117,27 +117,27 @@ export const products = {
 export interface DriverRow { id: string; name: string; vehicle_type: 'bike' | 'car' | 'van' | 'truck'; capacity: number; max_package_size: 'small' | 'medium' | 'large' }
 type DriverAvailability = 'available' | 'on_route' | 'break' | 'offline';
 export interface DriverFull extends DriverRow {
-  status: DriverAvailability; current_order_count: number; lat: number | null; lng: number | null; location_at: string | null; geo_lat: number | null; geo_lng: number | null; location_address: string | null;
+  status: DriverAvailability; current_order_count: number; latitude: number | null; longitude: number | null; location_at: string | null; location_address: string | null;
 }
 
 const DRIVER_SELECT = `
   SELECT d.*, s.status, s.current_order_count,
-         loc.lat AS lat, loc.lng AS lng, loc.recorded_at AS location_at,
-         loc.geo_lat, loc.geo_lng, loc.address AS location_address
+         loc.latitude, loc.longitude, loc.recorded_at AS location_at,
+         loc.address AS location_address
   FROM drivers d
   JOIN driver_status s ON s.driver_id = d.id
   LEFT JOIN LATERAL (
-    SELECT lat, lng, recorded_at, geo_lat, geo_lng, address FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1
+    SELECT latitude, longitude, recorded_at, address FROM driver_locations WHERE driver_id = d.id ORDER BY id DESC LIMIT 1
   ) loc ON true`;
 
 export const drivers = {
-  async create(input: { name: string; vehicleType: DriverRow['vehicle_type']; capacity: number; maxPackageSize: DriverRow['max_package_size']; lat: number; lng: number; status?: DriverAvailability; address?: string | null; geoLat?: number | null; geoLng?: number | null }) {
+  async create(input: { name: string; vehicleType: DriverRow['vehicle_type']; capacity: number; maxPackageSize: DriverRow['max_package_size']; latitude: number; longitude: number; status?: DriverAvailability; address?: string | null }) {
     const did = id('drv');
     await tx(async () => {
       await q(`INSERT INTO drivers (id, name, vehicle_type, capacity, max_package_size) VALUES (?,?,?,?,?)`,
         [did, input.name, input.vehicleType, input.capacity, input.maxPackageSize]);
       await q(`INSERT INTO driver_status (driver_id, status, current_order_count) VALUES (?, ?, 0)`, [did, input.status ?? 'available']);
-      await q(`INSERT INTO driver_locations (driver_id, lat, lng, address, geo_lat, geo_lng) VALUES (?, ?, ?, ?, ?, ?)`, [did, input.lat, input.lng, input.address ?? null, input.geoLat ?? null, input.geoLng ?? null]);
+      await q(`INSERT INTO driver_locations (driver_id, latitude, longitude, address) VALUES (?, ?, ?, ?)`, [did, input.latitude, input.longitude, input.address ?? null]);
     });
     return { id: did };
   },
@@ -150,16 +150,16 @@ export const drivers = {
     await q(`UPDATE driver_status SET current_order_count = GREATEST(0, current_order_count + ?), updated_at = ? WHERE driver_id = ?`,
       [delta, nowIso(), did]);
   },
-  async recordLocation(did: string, lat: number, lng: number, address?: string | null, geoLat?: number | null, geoLng?: number | null) {
-    await q(`INSERT INTO driver_locations (driver_id, lat, lng, address, geo_lat, geo_lng) VALUES (?, ?, ?, ?, ?, ?)`, [did, lat, lng, address ?? null, geoLat ?? null, geoLng ?? null]);
+  async recordLocation(did: string, latitude: number, longitude: number, address?: string | null) {
+    await q(`INSERT INTO driver_locations (driver_id, latitude, longitude, address) VALUES (?, ?, ?, ?)`, [did, latitude, longitude, address ?? null]);
   },
 };
 
 /* ----------------------------------------------------------------- orders */
 export interface OrderRow {
   id: string; merchant_id: string; store_id: string; customer_id: string;
-  pickup_lat: number; pickup_lng: number; delivery_lat: number; delivery_lng: number;
-  delivery_address?: string | null; delivery_geo_lat?: number | null; delivery_geo_lng?: number | null;
+  pickup_latitude: number; pickup_longitude: number; delivery_latitude: number; delivery_longitude: number;
+  delivery_address: string;
   status: OrderStatus; priority: 'standard' | 'express'; deadline_ts: string;
   package_size: 'small' | 'medium' | 'large'; volume: number; note: string | null;
   created_at: string; ready_at: string | null;
@@ -172,10 +172,10 @@ export const orders = {
     const oid = id('ord');
     await tx(async () => {
       await q(`
-        INSERT INTO orders (id, merchant_id, store_id, customer_id, pickup_lat, pickup_lng, delivery_lat, delivery_lng, delivery_address, delivery_geo_lat, delivery_geo_lng, status, priority, deadline_ts, package_size, volume, note)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?, 'created', ?,?,?,?,?)`,
-        [oid, input.merchant_id, input.store_id, input.customer_id, input.pickup_lat, input.pickup_lng,
-          input.delivery_lat, input.delivery_lng, input.delivery_address ?? null, input.delivery_geo_lat ?? null, input.delivery_geo_lng ?? null,
+        INSERT INTO orders (id, merchant_id, store_id, customer_id, pickup_latitude, pickup_longitude, delivery_latitude, delivery_longitude, delivery_address, status, priority, deadline_ts, package_size, volume, note)
+        VALUES (?,?,?,?,?,?,?,?,?, 'created', ?,?,?,?,?)`,
+        [oid, input.merchant_id, input.store_id, input.customer_id, input.pickup_latitude, input.pickup_longitude,
+          input.delivery_latitude, input.delivery_longitude, input.delivery_address,
           input.priority, input.deadline_ts, input.package_size, input.volume, input.note ?? null]);
       for (const item of input.items ?? []) {
         await q(`INSERT INTO order_items (order_id, product_id, name, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?)`,
@@ -264,24 +264,24 @@ export const deliveries = {
 
 /* ------------------------------------------------------------------ routes */
 export interface RouteRow {
-  id: string; delivery_id: string; driver_id: string; origin_lat: number; origin_lng: number;
-  legs_json: unknown; path_json: { toPickup?: { x: number; y: number }[]; toDropoff?: { x: number; y: number }[] };
-  distance_km: number; eta_minutes: number; traffic_penalty_minutes: number; active: number; created_at: string;
+  id: string; delivery_id: string; driver_id: string; origin_latitude: number; origin_longitude: number;
+  legs_json: unknown; path_json: { toPickup?: GeoPoint[]; toDropoff?: GeoPoint[] };
+  distance_km: number; eta_minutes: number; active: number; created_at: string;
 }
 
 export const routes = {
   activeForDelivery(dsid: string) {
     return q1<RouteRow>(`SELECT * FROM routes WHERE delivery_id = ? AND active = 1 ORDER BY created_at DESC, id DESC LIMIT 1`, [dsid]);
   },
-  async create(input: { deliveryId: string; driverId: string; originLat: number; originLng: number; legs: unknown; path: unknown; distanceKm: number; etaMinutes: number; trafficPenalty: number }): Promise<RouteRow> {
+  async create(input: { deliveryId: string; driverId: string; originLat: number; originLng: number; legs: unknown; path: unknown; distanceKm: number; etaMinutes: number }): Promise<RouteRow> {
     return tx(async () => {
       await q(`UPDATE routes SET active = 0 WHERE delivery_id = ?`, [input.deliveryId]);
       const rid = id('rte');
       const rows = await q<RouteRow>(`
-        INSERT INTO routes (id, delivery_id, driver_id, origin_lat, origin_lng, legs_json, path_json, distance_km, eta_minutes, traffic_penalty_minutes, active)
-        VALUES (?,?,?,?,?, ?::jsonb, ?::jsonb, ?,?,?, 1) RETURNING *`,
+        INSERT INTO routes (id, delivery_id, driver_id, origin_latitude, origin_longitude, legs_json, path_json, distance_km, eta_minutes, active)
+        VALUES (?,?,?,?,?, ?::jsonb, ?::jsonb, ?,?, 1) RETURNING *`,
         [rid, input.deliveryId, input.driverId, input.originLat, input.originLng,
-          JSON.stringify(input.legs), JSON.stringify(input.path), input.distanceKm, input.etaMinutes, input.trafficPenalty]);
+          JSON.stringify(input.legs), JSON.stringify(input.path), input.distanceKm, input.etaMinutes]);
       return rows[0];
     });
   },
@@ -315,35 +315,3 @@ export const assignments = {
   },
 };
 
-/* -------------------------------------------------------------- road / traffic */
-export interface RoadRow { id: string; ax: number; ay: number; bx: number; by: number; status: 'clear' | 'moderate' | 'heavy' | 'closed'; delay_minutes: number; updated_at: string }
-
-export const roads = {
-  all() { return q<RoadRow>(`SELECT * FROM road_segments ORDER BY id`); },
-  async segments(): Promise<Segment[]> {
-    return (await roads.all()).map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status, delay_minutes: r.delay_minutes }));
-  },
-  byId(rid: string) { return q1<RoadRow>(`SELECT * FROM road_segments WHERE id = ?`, [rid]); },
-  async upsert(r: { id: string; ax: number; ay: number; bx: number; by: number; status?: RoadRow['status']; delay?: number }) {
-    await q(`
-      INSERT INTO road_segments (id, ax, ay, bx, by, status, delay_minutes) VALUES (?,?,?,?,?,?,?)
-      ON CONFLICT (id) DO UPDATE SET status = excluded.status, delay_minutes = excluded.delay_minutes, updated_at = now()`,
-      [r.id, r.ax, r.ay, r.bx, r.by, r.status ?? 'clear', r.delay ?? 0]);
-  },
-  async setStatus(rid: string, status: RoadRow['status'], delay: number) {
-    await q(`UPDATE road_segments SET status = ?, delay_minutes = ?, updated_at = now() WHERE id = ?`, [status, delay, rid]);
-  },
-};
-
-export const traffic = {
-  all() {
-    return q<{ id: string; area: string; status: string; delay_minutes: number; source: string; updated_at: string }>(
-      `SELECT * FROM traffic_conditions ORDER BY area`);
-  },
-  async upsert(t: { id: string; area: string; status: 'clear' | 'moderate' | 'heavy'; delay: number; source: string }) {
-    await q(`
-      INSERT INTO traffic_conditions (id, area, status, delay_minutes, source) VALUES (?,?,?,?,?)
-      ON CONFLICT (id) DO UPDATE SET status = excluded.status, delay_minutes = excluded.delay_minutes, source = excluded.source, updated_at = now()`,
-      [t.id, t.area, t.status, t.delay, t.source]);
-  },
-};

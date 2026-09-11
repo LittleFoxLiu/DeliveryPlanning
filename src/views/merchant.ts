@@ -9,14 +9,14 @@ interface MerchantOrders { orders: OrderDto[] }
 interface OrderDetail {
   order: OrderDto;
   delivery: OrderDto['delivery'];
-  assignedDriver: { name: string; vehicleType: string; status: string; location: { x: number; y: number } | null; geoLocation?: { lat: number; lon: number; address?: string | null } | null } | null;
-  route?: { path: { toPickup?: { x: number; y: number }[]; toDropoff?: { x: number; y: number }[] } } | null;
+  assignedDriver: { name: string; vehicleType: string; status: string; location: { lat: number; lon: number; address?: string | null } | null } | null;
+  route?: { path: { toPickup?: { lat: number; lon: number }[]; toDropoff?: { lat: number; lon: number }[] } } | null;
   events: { agent: string; message: string; ts: string }[];
   run?: PublicRun | null;
 }
 
 let selected: string | null = null;
-let stores: { id: string; name: string; pickup: { x: number; y: number } }[] = [];
+let stores: { id: string; name: string; pickup: { lat: number; lon: number; address?: string | null } }[] = [];
 let productList: ProductDto[] = [];
 let cart: Cart = {};
 let orderDeliveryGeo: GeoPoint | null = null;
@@ -152,9 +152,8 @@ function newOrderCard(): string {
     <div style="margin:12px 0">${productGrid(products, cart)}</div>
     <div style="margin-bottom:12px">${cartSummary(products, cart)}</div>
     <form class="inline-form" id="new-order-tail">
-      <label class="full">Delivery address<input name="deliveryAddress" data-merchant-address required placeholder="Search with Nominatim" value="${esc(orderDeliveryGeo?.name || '')}"></label>
-      <input name="deliveryLat" type="hidden" value="7"><input name="deliveryLng" type="hidden" value="4">
-      <input name="deliveryGeoLat" type="hidden" value="${orderDeliveryGeo?.lat ?? ''}"><input name="deliveryGeoLng" type="hidden" value="${orderDeliveryGeo?.lon ?? ''}">
+      <label class="full">Delivery address<input name="deliveryAddress" data-merchant-address required placeholder="Search with Nominatim" value="${esc(orderDeliveryGeo?.address || orderDeliveryGeo?.name || '')}"></label>
+      <input name="deliveryLat" type="hidden" value="${orderDeliveryGeo?.lat ?? ''}"><input name="deliveryLng" type="hidden" value="${orderDeliveryGeo?.lon ?? ''}">
       <label class="full">Note<input name="note" placeholder="optional delivery note"></label>
       <label class="full">Deadline<input name="deadlineTs" type="datetime-local" value="${soon}" required></label>
       <button class="btn primary full" type="submit"${cartCount(cart) ? '' : ' disabled'}>Create order</button>
@@ -166,22 +165,29 @@ function wire(el: HTMLElement, detail: OrderDetail | null = null): void {
   const routeMap = el.querySelector<HTMLElement>('#merchant-route-map');
   if (routeMap && detail) {
     const points: Array<GeoPoint & { kind: string; name: string; detail?: string }> = [];
-    if (detail.assignedDriver?.geoLocation) points.push({ ...detail.assignedDriver.geoLocation, kind: 'Driver', name: detail.assignedDriver.name, detail: detail.assignedDriver.status });
-    if (detail.order.pickup.lat != null && detail.order.pickup.lon != null) points.push({ lat: detail.order.pickup.lat, lon: detail.order.pickup.lon, kind: 'Pickup', name: detail.order.storeName || 'Merchant pickup', detail: detail.order.pickup.address || undefined });
-    if (detail.order.dropoff.lat != null && detail.order.dropoff.lon != null) points.push({ lat: detail.order.dropoff.lat, lon: detail.order.dropoff.lon, kind: 'Drop-off', name: detail.order.customerName, detail: detail.order.dropoff.address || undefined });
-    const path = [...(detail.route?.path.toPickup ?? []), ...(detail.route?.path.toDropoff ?? [])].map((p) => [p.y, p.x] as [number, number]);
+    if (detail.assignedDriver?.location) points.push({ ...detail.assignedDriver.location, kind: 'Driver', name: detail.assignedDriver.name, detail: detail.assignedDriver.status });
+    if (detail.order.pickup.lat != null && detail.order.pickup.lon != null) points.push({ lat: detail.order.pickup.lat, lon: detail.order.pickup.lon, kind: 'Pickup', name: detail.order.storeName || 'Merchant pickup', address: detail.order.pickup.address, detail: detail.order.pickup.address || undefined });
+    if (detail.order.dropoff.lat != null && detail.order.dropoff.lon != null) points.push({ lat: detail.order.dropoff.lat, lon: detail.order.dropoff.lon, kind: 'Drop-off', name: detail.order.customerName, address: detail.order.dropoff.address, detail: detail.order.dropoff.address || undefined });
+    const path = [...(detail.route?.path.toPickup ?? []), ...(detail.route?.path.toDropoff ?? [])].map((p) => [p.lat, p.lon] as [number, number]);
     mountRouteMap(routeMap, points, path.length > 1 ? [path] : []);
   }
   const repaint = () => renderMerchant(el, null, currentPage);
   const address = el.querySelector<HTMLInputElement>('[data-merchant-address]');
+  address?.addEventListener('input', () => {
+    orderDeliveryGeo = null;
+    const form = address.form;
+    if (!form) return;
+    (form.elements.namedItem('deliveryLat') as HTMLInputElement).value = '';
+    (form.elements.namedItem('deliveryLng') as HTMLInputElement).value = '';
+  });
   address?.addEventListener('change', async () => {
     const point = (await searchNominatim(address.value).catch(() => []))[0];
     if (!point) return;
     orderDeliveryGeo = point;
-    address.value = point.name;
+    address.value = point.address || point.name || '';
     const form = address.form!;
-    (form.elements.namedItem('deliveryGeoLat') as HTMLInputElement).value = String(point.lat);
-    (form.elements.namedItem('deliveryGeoLng') as HTMLInputElement).value = String(point.lon);
+    (form.elements.namedItem('deliveryLat') as HTMLInputElement).value = String(point.lat);
+    (form.elements.namedItem('deliveryLng') as HTMLInputElement).value = String(point.lon);
   });
 
   el.querySelectorAll<HTMLElement>('[data-open]').forEach((r) => r.addEventListener('click', (e) => {
@@ -253,7 +259,7 @@ function wire(el: HTMLElement, detail: OrderDetail | null = null): void {
       await post('/merchant/orders', {
         storeId: h.get('storeId'), customerName: h.get('customerName'), priority: h.get('priority'),
         deliveryLat: Number(t.get('deliveryLat')), deliveryLng: Number(t.get('deliveryLng')),
-        deliveryAddress: t.get('deliveryAddress'), deliveryGeoLat: Number(t.get('deliveryGeoLat')), deliveryGeoLng: Number(t.get('deliveryGeoLng')),
+        deliveryAddress: orderDeliveryGeo?.address || orderDeliveryGeo?.name || t.get('deliveryAddress'),
         note: t.get('note') || undefined,
         deadlineTs: new Date(String(t.get('deadlineTs'))).toISOString(),
         items: cartItems(cart),

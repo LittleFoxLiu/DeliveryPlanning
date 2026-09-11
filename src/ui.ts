@@ -88,7 +88,6 @@ export const AGENT_COLOR: Record<string, string> = {
   DispatchAgent: '#f26249',
   MonitoringAgent: '#e0567d',
   Driver: '#4fa676',
-  TrafficFeed: '#98a2b3',
 };
 
 export function statusChip(status: string): string {

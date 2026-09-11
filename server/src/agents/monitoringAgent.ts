@@ -1,17 +1,17 @@
 import { deliveries, orders, drivers, routes, stores, type DeliveryRow, type OrderRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
-import type { Point } from '../engine/routing.js';
-import { calculateGeoRoute, estimateGeoDelivery, type GeoPoint } from '../engine/geoRouting.js';
+import { calculateGeoRoute, estimateGeoDelivery } from '../engine/geoRouting.js';
+import { distanceKm, type GeoPoint } from '../geo.js';
 import { narrateRisk } from './llm.js';
 
 const NAME = 'MonitoringAgent';
 const DELAY_THRESHOLD_MIN = 3;
-const DEVIATION_THRESHOLD = 2.5; // grid units from the planned path
+const DEVIATION_THRESHOLD_KM = 1.5; // distance from the planned OSRM geometry
 
 export const monitoringTools = {
   get_driver_position: async (driverId: string) => {
     const d = await drivers.byId(driverId);
-    return d && d.lat != null ? { lat: d.lat, lng: d.lng as number, at: d.location_at } : undefined;
+    return d && d.latitude != null ? { lat: d.latitude, lon: d.longitude as number, at: d.location_at } : undefined;
   },
   get_order_status: async (orderId: string) => (await orders.byId(orderId))?.status,
   get_current_route: (deliveryId: string) => routes.activeForDelivery(deliveryId),
@@ -30,25 +30,22 @@ export const monitoringTools = {
       projectedDoneTs: new Date(projectedDoneMs).toISOString(),
     };
   },
-  detect_route_deviation: (pos: Point, path: Point[]) => {
+  detect_route_deviation: (pos: GeoPoint, path: GeoPoint[]) => {
     if (!path.length) return { deviating: false, distance: 0 };
     let min = Infinity;
     for (const p of path) {
-      const d = Math.hypot(p.x - pos.x, p.y - pos.y);
+      const d = distanceKm(p, pos);
       if (d < min) min = d;
     }
-    return { deviating: min > DEVIATION_THRESHOLD, distance: Number(min.toFixed(2)) };
+    return { deviating: min > DEVIATION_THRESHOLD_KM, distance: Number(min.toFixed(2)) };
   },
-  estimate_new_eta: async (pos: Point, pickup: Point, dropoff: Point, phase: 'to_pickup' | 'to_dropoff', geo?: { driver: GeoPoint; pickup: GeoPoint; dropoff: GeoPoint }) => {
-    if (geo) {
-      if (phase === 'to_dropoff') {
-        const r = await calculateGeoRoute(geo.driver, geo.dropoff);
-        return { totalMinutes: r.etaMinutes, reachable: r.reachable };
-      }
-      const e = await estimateGeoDelivery(geo.driver, geo.pickup, geo.dropoff);
-      return { totalMinutes: e.totalMinutes, reachable: e.reachable };
+  estimate_new_eta: async (pos: GeoPoint, pickup: GeoPoint, dropoff: GeoPoint, phase: 'to_pickup' | 'to_dropoff') => {
+    if (phase === 'to_dropoff') {
+      const r = await calculateGeoRoute(pos, dropoff);
+      return { totalMinutes: r.etaMinutes, reachable: r.reachable };
     }
-    return { totalMinutes: Infinity, reachable: false };
+    const e = await estimateGeoDelivery(pos, pickup, dropoff);
+    return { totalMinutes: e.totalMinutes, reachable: e.reachable };
   },
   /** Raise a remediation request for the Coordinator to act on. The Monitoring
    *  Agent detects and recommends; it never mutates the assignment itself. */
@@ -91,7 +88,7 @@ export const monitoringAgent = {
       const order = await orders.byId(delivery.order_id);
       if (!order || !delivery.driver_id) continue;
       const driver = await drivers.byId(delivery.driver_id);
-      const pos = driver && driver.lat != null ? { x: driver.lat, y: driver.lng as number } : null;
+      const pos = driver && driver.latitude != null ? { lat: driver.latitude, lon: driver.longitude as number } : null;
       const phase: Finding['phase'] = ['picked_up', 'en_route_drop'].includes(delivery.status) ? 'to_dropoff' : 'to_pickup';
       const issues: string[] = [];
       let trigger: Trigger = 'none';
@@ -112,23 +109,18 @@ export const monitoringAgent = {
       }
       if (!pos) continue;
 
-      const pickup: Point = { x: order.pickup_lat, y: order.pickup_lng };
-      const dropoff: Point = { x: order.delivery_lat, y: order.delivery_lng };
+      const pickup: GeoPoint = { lat: order.pickup_latitude, lon: order.pickup_longitude };
+      const dropoff: GeoPoint = { lat: order.delivery_latitude, lon: order.delivery_longitude };
       const store = await stores.byId(order.store_id);
-      const geo = driver.geo_lat != null && driver.geo_lng != null && store?.geo_lat != null && store.geo_lng != null
-        && order.delivery_geo_lat != null && order.delivery_geo_lng != null
-        ? {
-          driver: { lat: driver.geo_lat, lon: driver.geo_lng },
-          pickup: { lat: store.geo_lat, lon: store.geo_lng },
-          dropoff: { lat: order.delivery_geo_lat, lon: order.delivery_geo_lng },
-        }
-        : undefined;
-      const newEta = await monitoringTools.estimate_new_eta(pos, pickup, dropoff, phase, geo);
+      if (!store) continue;
+      const newEta = await monitoringTools.estimate_new_eta(
+        pos, { lat: store.latitude, lon: store.longitude }, dropoff, phase,
+      );
       const delay = monitoringTools.detect_delay(delivery, newEta.totalMinutes, order);
 
       const route = await monitoringTools.get_current_route(delivery.id);
       const rp = route?.path_json ?? {};
-      const path: Point[] = [...(rp.toPickup ?? []), ...(rp.toDropoff ?? [])];
+      const path: GeoPoint[] = [...(rp.toPickup ?? []), ...(rp.toDropoff ?? [])];
       const deviation = monitoringTools.detect_route_deviation(pos, path);
 
       if (!newEta.reachable) { issues.push('route_blocked'); trigger = 'reroute'; }

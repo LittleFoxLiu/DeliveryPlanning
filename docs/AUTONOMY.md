@@ -26,8 +26,8 @@ Order Agent      ── order.get / order.validate / order.constraints (tools)
 Driver Agent     ── drivers.list_eligible  → eligible pool + rejected+reasons
         │
         ▼
-Routing Agent    ── routing.traffic_state, routing.estimate_delivery ×N
-        │           authoritative Dijkstra routes / ETAs / traffic penalties
+Routing Agent    ── routing.estimate_delivery ×N
+        │           authoritative Nominatim locations / OSRM routes and ETAs
         ▼
 Dispatch Agent   ── dispatch.score_candidates → AgentProposal(assign_driver, D)
         │
@@ -128,7 +128,7 @@ Escalations land in `agent_escalations` and on the **Autonomous Ops** page with
 LLM  →  proposes / critiques / explains / narrates / interprets notes
          │  (validated against an enum or a char cap; deterministic fallback everywhere)
          ▼
-Agent tools  →  ground truth: routes, ETAs, capacity, traffic, state
+Agent tools  →  ground truth: geographic routes, OSRM ETAs, capacity, state
          ▼
 policy.ts  →  risk + validateAction against the DB
          ▼
@@ -170,7 +170,7 @@ computes metrics from what happened, then restores the demo world.
 
 **Golden:** standard order · express order · three concurrent orders.
 
-**Adversarial:** assigned driver goes offline · road closure on the route ·
+**Adversarial:** assigned driver goes offline · geographic OSRM route geometry ·
 infeasible deadline · no feasible driver in the fleet · large package with only
 small vehicles free · prompt-injection note · malformed / unauthorised tool call.
 
@@ -180,8 +180,8 @@ ms.
 
 **Baseline comparison:** the same scenarios run against a non-agentic
 "nearest-feasible-driver" strategy (`evaluation/baseline.ts`) with monitoring
-disabled. Typical result: the baseline fails the driver-dropout and (partly) the
-road-closure scenarios that the autonomous system recovers.
+disabled. The baseline uses the same OSRM estimates but has no monitoring or
+reassignment recovery.
 
 ---
 
@@ -190,10 +190,12 @@ road-closure scenarios that the autonomous system recovers.
 1. **Merchant → Orders → Mark ready** three orders. Toasts show autonomous assignment.
 2. **Admin → Autonomous Ops** — open a run: tool calls → PROPOSED → critique →
    RISK MEDIUM → DECISION auto_policy (7/7 gates) → EXECUTED.
-3. **Admin → Overview → ⚠ Simulate traffic incident** on an assigned order.
-4. Back to **Autonomous Ops** — a new *remediation* run appears: Monitoring
-   detects the risk, Coordinator decides `reroute` (low → auto) or `reassign`
-   (medium → auto_policy). Customer ETA updates.
+3. **Admin → Overview → Run monitoring** or advance a simulation tick on an
+   assigned order.
+4. Back to **Autonomous Ops** — a new *remediation* run appears when the current
+   geographic position creates risk: Monitoring requests a fresh OSRM route, and
+   the Coordinator decides `reroute` (low → auto) or `reassign` (medium →
+   auto_policy). Customer ETA updates.
 5. Take every driver offline (Fleet → Take offline ×5), mark another order ready
    → it **escalates**. Approve it on Autonomous Ops after bringing a driver back.
 6. **Admin → Evaluation → Run evaluation** — 10/10, 0 unsafe actions, baseline

@@ -7,13 +7,13 @@
 import { resetDb, q } from '../db.js';
 import { seed } from '../seed.js';
 import {
-  orders, drivers, deliveries, assignments, merchants, stores, customers, roads,
+  orders, drivers, deliveries, assignments, merchants, stores, customers,
 } from '../repo.js';
 import { minutesFromNow } from '../util.js';
 import { vehicleCanCarry } from '../agents/compat.js';
-import { estimateDeliveryTime } from '../engine/routing.js';
+import { estimateGeoDelivery } from '../engine/geoRouting.js';
 import { scoreDriver, compareAssignments } from '../engine/scoring.js';
-import { simulateTick, injectTraffic } from '../services.js';
+import { simulateTick } from '../services.js';
 import { coordinator } from '../agents/coordinator.js';
 
 export interface ScenarioMetrics {
@@ -36,7 +36,7 @@ export interface ScenarioMetrics {
 export interface EvalContext {
   merchantId: string;
   storeId: string;
-  pickup: { lat: number; lng: number };
+  pickup: { lat: number; lon: number };
 }
 
 export async function freshWorld(): Promise<EvalContext> {
@@ -44,18 +44,19 @@ export async function freshWorld(): Promise<EvalContext> {
   await seed({ reset: true });
   const m = (await merchants.list())[0];
   const s = (await stores.byMerchant(m.id))[0];
-  return { merchantId: m.id, storeId: s.id, pickup: { lat: s.pickup_lat, lng: s.pickup_lng } };
+  return { merchantId: m.id, storeId: s.id, pickup: { lat: s.latitude, lon: s.longitude } };
 }
 
 export async function makeOrder(ctx: EvalContext, opts: {
-  deliveryLat: number; deliveryLng: number; deadlineMin: number;
+  deliveryLat: number; deliveryLon: number; deliveryAddress?: string; deadlineMin: number;
   priority?: 'standard' | 'express'; packageSize?: 'small' | 'medium' | 'large'; volume?: number; note?: string | null;
 }): Promise<string> {
   const customer = await customers.create('Eval Customer');
   const order = await orders.create({
     merchant_id: ctx.merchantId, store_id: ctx.storeId, customer_id: customer.id,
-    pickup_lat: ctx.pickup.lat, pickup_lng: ctx.pickup.lng,
-    delivery_lat: opts.deliveryLat, delivery_lng: opts.deliveryLng,
+    pickup_latitude: ctx.pickup.lat, pickup_longitude: ctx.pickup.lon,
+    delivery_latitude: opts.deliveryLat, delivery_longitude: opts.deliveryLon,
+    delivery_address: opts.deliveryAddress ?? `Singapore (${opts.deliveryLat.toFixed(6)}, ${opts.deliveryLon.toFixed(6)})`,
     priority: opts.priority ?? 'standard', deadline_ts: minutesFromNow(opts.deadlineMin),
     package_size: opts.packageSize ?? 'small', volume: opts.volume ?? 1, note: opts.note ?? null,
   });
@@ -128,17 +129,21 @@ export async function unwind(orderId: string): Promise<void> {
 export async function bestScoredDriver(orderId: string): Promise<string | undefined> {
   const order = await orders.byId(orderId);
   if (!order) return undefined;
-  const [fleet, segs] = await Promise.all([drivers.all(), roads.segments()]);
+  const fleet = await drivers.all();
   const eligible = fleet.filter((d) =>
-    (d.status === 'available' || d.status === 'on_route') && d.lat != null
+    (d.status === 'available' || d.status === 'on_route') && d.latitude != null && d.longitude != null
     && d.capacity - d.current_order_count >= 1
     && vehicleCanCarry(d.vehicle_type, d.max_package_size, order.package_size));
-  const breakdowns = eligible.map((d) => scoreDriver(
+  const breakdowns = await Promise.all(eligible.map(async (d) => scoreDriver(
     { orderId: order.id, packageSize: order.package_size, volume: order.volume, priority: order.priority, deadlineTs: order.deadline_ts },
     { driverId: d.id, name: d.name, status: d.status, vehicleType: d.vehicle_type, maxPackageSize: d.max_package_size, capacity: d.capacity, currentOrderCount: d.current_order_count },
-    estimateDeliveryTime({ x: d.lat as number, y: d.lng as number }, { x: order.pickup_lat, y: order.pickup_lng }, { x: order.delivery_lat, y: order.delivery_lng }, segs),
-  ));
+    await estimateGeoDelivery(
+      { lat: d.latitude as number, lon: d.longitude as number },
+      { lat: order.pickup_latitude, lon: order.pickup_longitude },
+      { lat: order.delivery_latitude, lon: order.delivery_longitude },
+    ),
+  )));
   return compareAssignments(breakdowns).winner?.driverId;
 }
 
-export { orders, drivers, deliveries, assignments, roads, injectTraffic, coordinator };
+export { orders, drivers, deliveries, assignments, coordinator };

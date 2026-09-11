@@ -3,13 +3,11 @@
  * a deterministic engine or repo function — the LLM never runs these, agents do,
  * and every call is recorded. Execution tools live in `execution.ts`.
  */
-import { orders, drivers, deliveries, stores, customers, merchants, roads } from '../repo.js';
-import { estimateDeliveryTime, type Point } from '../engine/routing.js';
+import { orders, drivers, deliveries, stores, customers, merchants } from '../repo.js';
 import { calculateGeoRoute, estimateGeoDelivery } from '../engine/geoRouting.js';
 import { scoreDriver, compareAssignments, type ScoreBreakdown } from '../engine/scoring.js';
 import { driverAgent } from './driverAgent.js';
 import { orderAgent } from './orderAgent.js';
-import { routingAgent } from './routingAgent.js';
 import { defineTool, obj, reqStr, idLike } from './toolRegistry.js';
 
 /* --------------------------------------------------------------- Order Agent */
@@ -28,7 +26,7 @@ export const tGetOrder = defineTool({
     return {
       id: o.id, status: o.status, priority: o.priority, packageSize: o.package_size, volume: o.volume,
       deadlineTs: o.deadline_ts, note: o.note,
-      pickup: { x: o.pickup_lat, y: o.pickup_lng }, dropoff: { x: o.delivery_lat, y: o.delivery_lng },
+      pickup: { lat: o.pickup_latitude, lon: o.pickup_longitude }, dropoff: { lat: o.delivery_latitude, lon: o.delivery_longitude, address: o.delivery_address },
       storeName: store?.name ?? null, customerName: customer?.name ?? 'Customer',
     };
   },
@@ -77,7 +75,7 @@ export const tListEligibleDrivers = defineTool({
         driverId: c.driver.id, name: c.driver.name, vehicleType: c.driver.vehicle_type,
         maxPackageSize: c.driver.max_package_size, capacity: c.driver.capacity,
         currentOrderCount: c.driver.current_order_count, headroom: c.headroom, status: c.driver.status,
-        location: { x: c.location.lat, y: c.location.lng },
+        location: c.location,
       })),
       rejected: res.rejected,
     };
@@ -97,7 +95,7 @@ export const tDriverState = defineTool({
     return {
       id: d.id, name: d.name, status: d.status, vehicleType: d.vehicle_type,
       maxPackageSize: d.max_package_size, capacity: d.capacity, currentOrderCount: d.current_order_count,
-      location: d.lat != null ? { x: d.lat, y: d.lng } : null,
+      location: d.latitude != null ? { lat: d.latitude, lon: d.longitude! } : null,
     };
   },
 });
@@ -106,7 +104,7 @@ export const tDriverState = defineTool({
 
 export const tEstimateDelivery = defineTool({
   name: 'routing.estimate_delivery',
-  description: 'Authoritative geo-routed driver→pickup→customer distance and ETA; traffic is currently ignored.',
+  description: 'Authoritative OSRM driver→pickup→customer distance and ETA from Nominatim-selected locations.',
   access: 'read',
   allowed: ['RoutingAgent', 'DispatchAgent'],
   input: (raw) => {
@@ -119,34 +117,21 @@ export const tEstimateDelivery = defineTool({
   summariseInput: (i) => `${i.driverId} → ${i.orderId}`,
   run: async ({ driverId, orderId }) => {
     const [d, o] = await Promise.all([drivers.byId(driverId), orders.byId(orderId)]);
-    if (!d || d.lat == null) throw new Error('driver_position_unknown');
+    if (!d || d.latitude == null || d.longitude == null) throw new Error('driver_position_unknown');
     if (!o) throw new Error('order_not_found');
     const store = await stores.byId(o.store_id);
-    const est = d.geo_lat != null && d.geo_lng != null && store?.geo_lat != null && store.geo_lng != null && o.delivery_geo_lat != null && o.delivery_geo_lng != null
-      ? await estimateGeoDelivery({ lat: d.geo_lat, lon: d.geo_lng }, { lat: store.geo_lat, lon: store.geo_lng }, { lat: o.delivery_geo_lat, lon: o.delivery_geo_lng })
-      : { toPickup: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, toDropoff: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, handlingMinutes: 3, totalMinutes: Infinity, totalDistanceKm: Infinity, reachable: false };
+    const est = d.latitude != null && d.longitude != null && store
+      ? await estimateGeoDelivery({ lat: d.latitude, lon: d.longitude }, { lat: store.latitude, lon: store.longitude }, { lat: o.delivery_latitude, lon: o.delivery_longitude })
+      : { toPickup: { path: [], distanceKm: Infinity, etaMinutes: Infinity, reachable: false }, toDropoff: { path: [], distanceKm: Infinity, etaMinutes: Infinity, reachable: false }, handlingMinutes: 3, totalMinutes: Infinity, totalDistanceKm: Infinity, reachable: false };
     return {
       reachable: est.reachable,
       etaToPickupMin: est.reachable ? est.toPickup.etaMinutes : null,
       etaToCustomerMin: est.reachable ? est.toDropoff.etaMinutes : null,
       totalMin: est.reachable ? est.totalMinutes : null,
       distanceKm: est.totalDistanceKm,
-      trafficPenaltyMin: est.reachable
-        ? Number((est.toPickup.trafficPenaltyMinutes + est.toDropoff.trafficPenaltyMinutes).toFixed(1)) : null,
-      blockedSegments: [...est.toPickup.blockedSegments, ...est.toDropoff.blockedSegments],
     };
   },
-  summariseOutput: (v) => (v.reachable ? `${v.totalMin} min total (+${v.trafficPenaltyMin} traffic)` : 'unreachable'),
-});
-
-export const tTrafficState = defineTool({
-  name: 'routing.traffic_state',
-  description: 'Current per-segment incidents and area conditions.',
-  access: 'read',
-  allowed: ['RoutingAgent', 'MonitoringAgent', 'Coordinator'],
-  input: (raw) => { obj(raw ?? {}, [], 'routing.traffic_state'); return {}; },
-  run: () => routingAgent.tools.get_traffic_conditions(),
-  summariseOutput: (v) => `${v.summary.closed} closed, ${v.summary.heavy} heavy, ${v.summary.moderate} moderate`,
+  summariseOutput: (v) => (v.reachable ? `${v.totalMin} min total via OSRM` : 'unreachable'),
 });
 
 /* ------------------------------------------------------------ Dispatch Agent */
@@ -178,11 +163,11 @@ export const tScoreCandidates = defineTool({
     const scored: ScoredCandidate[] = [];
     for (const { driverId } of candidates) {
       const d = byId.get(driverId);
-      if (!d || d.lat == null) continue;
+      if (!d || d.latitude == null || d.longitude == null) continue;
       const store = await stores.byId(order.store_id);
-      const est = d.geo_lat != null && d.geo_lng != null && store?.geo_lat != null && store.geo_lng != null && order.delivery_geo_lat != null && order.delivery_geo_lng != null
-        ? await estimateGeoDelivery({ lat: d.geo_lat, lon: d.geo_lng }, { lat: store.geo_lat, lon: store.geo_lng }, { lat: order.delivery_geo_lat, lon: order.delivery_geo_lng })
-        : { toPickup: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, toDropoff: { path: [], distanceKm: Infinity, etaMinutes: Infinity, baselineMinutes: Infinity, trafficPenaltyMinutes: 0, reachable: false, blockedSegments: [] }, handlingMinutes: 3, totalMinutes: Infinity, totalDistanceKm: Infinity, reachable: false };
+      const est = d.latitude != null && d.longitude != null && store
+        ? await estimateGeoDelivery({ lat: d.latitude, lon: d.longitude }, { lat: store.latitude, lon: store.longitude }, { lat: order.delivery_latitude, lon: order.delivery_longitude })
+        : { toPickup: { path: [], distanceKm: Infinity, etaMinutes: Infinity, reachable: false }, toDropoff: { path: [], distanceKm: Infinity, etaMinutes: Infinity, reachable: false }, handlingMinutes: 3, totalMinutes: Infinity, totalDistanceKm: Infinity, reachable: false };
       const breakdown = scoreDriver(
         { orderId: order.id, packageSize: order.package_size, volume: order.volume, priority: order.priority, deadlineTs: order.deadline_ts },
         { driverId: d.id, name: d.name, status: d.status, vehicleType: d.vehicle_type, maxPackageSize: d.max_package_size, capacity: d.capacity, currentOrderCount: d.current_order_count },
@@ -212,16 +197,14 @@ export const tAssessDelivery = defineTool({
     ]);
     if (!order) throw new Error('order_not_found');
     const phase: 'to_pickup' | 'to_dropoff' = ['picked_up', 'en_route_drop'].includes(dv.status) ? 'to_dropoff' : 'to_pickup';
-    if (!driver || driver.status === 'offline' || driver.lat == null) {
+    if (!driver || driver.status === 'offline' || driver.latitude == null || driver.longitude == null) {
       return { phase, driverAvailable: false, reachable: false, projectedTotalMin: null, deadlineMs: Date.parse(order.deadline_ts), missesDeadline: true, slipMin: 9999 };
     }
     const store = await stores.byId(order.store_id);
-    const hasGeo = driver.geo_lat != null && driver.geo_lng != null && store?.geo_lat != null && store.geo_lng != null
-      && order.delivery_geo_lat != null && order.delivery_geo_lng != null;
-    if (!hasGeo) return { phase, driverAvailable: true, reachable: false, projectedTotalMin: null, deadlineMs: Date.parse(order.deadline_ts), missesDeadline: true, slipMin: 9999 };
+    if (!store) return { phase, driverAvailable: true, reachable: false, projectedTotalMin: null, deadlineMs: Date.parse(order.deadline_ts), missesDeadline: true, slipMin: 9999 };
     const projected = phase === 'to_dropoff'
-      ? (await calculateGeoRoute({ lat: driver.geo_lat!, lon: driver.geo_lng! }, { lat: order.delivery_geo_lat!, lon: order.delivery_geo_lng! })).etaMinutes
-      : (await estimateGeoDelivery({ lat: driver.geo_lat!, lon: driver.geo_lng! }, { lat: store.geo_lat!, lon: store.geo_lng! }, { lat: order.delivery_geo_lat!, lon: order.delivery_geo_lng! })).totalMinutes;
+      ? (await calculateGeoRoute({ lat: driver.latitude, lon: driver.longitude }, { lat: order.delivery_latitude, lon: order.delivery_longitude })).etaMinutes
+      : (await estimateGeoDelivery({ lat: driver.latitude, lon: driver.longitude }, { lat: store.latitude, lon: store.longitude }, { lat: order.delivery_latitude, lon: order.delivery_longitude })).totalMinutes;
     const reachable = Number.isFinite(projected);
     const deadlineMs = Date.parse(order.deadline_ts);
     const projectedDoneMs = Date.now() + (reachable ? projected * 60_000 : 9e12);
@@ -241,29 +224,28 @@ export const tAssessDelivery = defineTool({
 
 export const tNetworkState = defineTool({
   name: 'network.state',
-  description: 'Fleet + active deliveries + incidents snapshot for the Coordinator.',
+  description: 'Fleet and active-delivery snapshot for the Coordinator.',
   access: 'read',
   allowed: ['Coordinator'],
   input: (raw) => { obj(raw ?? {}, [], 'network.state'); return {}; },
   run: async () => {
-    const [fleet, active, incidents] = await Promise.all([
+    const [fleet, active] = await Promise.all([
       drivers.all(), deliveries.active(),
-      roads.all().then((rs) => rs.filter((r) => r.status !== 'clear')),
     ]);
     return {
       driversTotal: fleet.length,
       driversAvailable: fleet.filter((d) => d.status === 'available').length,
       deliveriesInFlight: active.filter((d) => ['assigned', 'en_route_pickup', 'picked_up', 'en_route_drop'].includes(d.status)).length,
-      roadIncidents: incidents.length,
+      routingProvider: 'OSRM',
     };
   },
-  summariseOutput: (v) => `${v.driversAvailable}/${v.driversTotal} free, ${v.deliveriesInFlight} in flight, ${v.roadIncidents} incidents`,
+  summariseOutput: (v) => `${v.driversAvailable}/${v.driversTotal} free, ${v.deliveriesInFlight} in flight, routes via ${v.routingProvider}`,
 });
 
 /** Force registration side-effects. */
 export const ALL_TOOLS = [
   tGetOrder, tValidateOrder, tOrderConstraints,
   tListEligibleDrivers, tDriverState,
-  tEstimateDelivery, tTrafficState,
+  tEstimateDelivery,
   tScoreCandidates, tAssessDelivery, tNetworkState,
 ];

@@ -2,9 +2,7 @@ export type Role = 'admin' | 'merchant' | 'driver' | 'customer';
 
 export interface User { id: string; email: string; role: Role; name: string; refId: string | null }
 
-export interface Point { x: number; y: number }
-
-export interface RoadSeg { id: string; ax: number; ay: number; bx: number; by: number; status: 'clear' | 'moderate' | 'heavy' | 'closed'; delay: number }
+export interface GeoPoint { lat: number; lon: number }
 
 export interface AgentEvent {
   id: number; ts: string; agent: string; eventType?: string; event_type?: string;
@@ -20,7 +18,7 @@ export interface ProductDto {
 
 export interface OrderDto {
   id: string; code: string; status: string; priority: string; packageSize: string; volume: number;
-  deadlineTs: string; note: string | null; pickup: Point & { lat?: number | null; lon?: number | null; address?: string | null }; dropoff: Point & { lat?: number | null; lon?: number | null; address?: string | null };
+  deadlineTs: string; note: string | null; pickup: GeoPoint & { name?: string | null; address?: string | null }; dropoff: GeoPoint & { address?: string | null };
   merchantId?: string; storeId?: string; storeName?: string | null;
   customerId?: string; customerName: string;
   items: OrderItem[]; itemsTotalCents?: number; createdAt?: string; readyAt?: string | null;
@@ -35,11 +33,11 @@ export interface DeliveryDto {
 }
 
 export interface RouteDto {
-  id: string; origin: Point; distanceKm: number; etaMinutes: number; trafficPenaltyMinutes: number;
-  legs: unknown; path: { toPickup?: Point[]; toDropoff?: Point[] };
+  id: string; origin: GeoPoint; distanceKm: number; etaMinutes: number;
+  legs: unknown; path: { toPickup?: GeoPoint[]; toDropoff?: GeoPoint[] };
 }
 
 export interface DriverDto {
   id: string; name: string; vehicleType: string; capacity: number; maxPackageSize: string;
-  status: string; currentOrderCount: number; location: Point | null; geoLocation?: { lat: number; lon: number; address?: string | null } | null; locationAt: string | null;
+  status: string; currentOrderCount: number; location: (GeoPoint & { address?: string | null }) | null; locationAt: string | null;
 }

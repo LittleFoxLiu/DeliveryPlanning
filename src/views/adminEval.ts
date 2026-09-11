@@ -75,7 +75,7 @@ function reportView(r: Report): string {
           <td><strong>${c.autonomous.recoveries}</strong></td>
         </tr></tbody>
       </table></div>
-      <p class="muted" style="margin-top:8px">The baseline has no monitoring and no recovery — when a driver drops out or a road closes it simply fails.</p>
+      <p class="muted" style="margin-top:8px">The baseline has no monitoring and no recovery — when a driver drops out or route conditions change it simply fails.</p>
     </div>
 
     <div class="card">

@@ -5,8 +5,8 @@ An autonomous, multi-agent delivery-dispatch platform (B2B2C).
 A customer places an order → a merchant marks it ready → a **coordinated set of
 specialised agents** validates it, finds eligible drivers, computes authoritative
 routes/ETAs, scores every driver/order pairing, assigns the best driver, notifies
-them, and then **monitors the delivery**, rerouting or reassigning when traffic or
-driver availability puts the deadline at risk.
+them, and then **monitors the delivery**, recalculating OSRM routes or reassigning
+when route risk or driver availability puts the deadline at risk.
 
 Every business-critical number (location, distance, ETA, deadline slack, capacity,
 score) is produced by **deterministic backend tools**. The LLM layer is optional
@@ -94,19 +94,13 @@ the repository root or has not deployed the `api/` function.
    route efficiency, and the rejected candidates).
 4. On the Dispatch screen click **▶ Simulate tick** a couple of times – drivers
    move along their routes.
-5. Click **⚠ Simulate traffic incident** – a road on the active route is closed
-   and the surrounding streets go heavy.
-6. Click **▶ Simulate tick** again:
-   - **Monitoring Agent** detects the delay / deadline risk.
-   - **Coordinator** asks the **Routing Agent** to recalculate.
-   - If the new route still meets the deadline → **reroute**, same driver, ETA
-     updated. If it *doesn't*, the Coordinator checks the other drivers and, if
-     one can make it, **reassigns** ("Driver B can make it with N min to spare").
-     Use the **express** order for the reassignment path (tight deadline).
-7. Alternatively click **Take offline** on the assigned driver, then **tick** –
+5. Click **▶ Simulate tick** again or **Run monitoring** – the **Monitoring Agent**
+   asks the Routing Agent for a fresh OSRM driving route and updates the ETA when
+   the current geographic position changes.
+6. Alternatively click **Take offline** on the assigned driver, then **tick** –
    the Monitoring Agent detects the driver is gone and the Coordinator runs a
    full **reassignment** to the next-best driver.
-8. **Customer** screen – the friendly status (`Placed → Preparing → Driver
+7. **Customer** screen – the friendly status (`Placed → Preparing → Driver
    assigned → Picked up → In transit → Delivered`), ETA and live progress feed
    update throughout. Agent messages use driver **names**, not ids.
 
@@ -132,7 +126,7 @@ Agent     Agent   Agent   Agent     Agent
    └─────────┴─────┴───────┴───────────┘
                    │  agents only act through deterministic tools
             ┌──────▼───────────────────────────┐
-            │ engine/  routing (Dijkstra)      │
+            │ engine/  routing (OSRM)          │
             │          scoring (multi-factor)  │
             │          stateMachine            │
             │ repo/    Postgres (pg / PGlite)  │
@@ -145,17 +139,16 @@ Agent     Agent   Agent   Agent     Agent
 |-------|---------|-----------------------|
 | **Order Agent** | is the order/merchant/pickup/customer valid; constraints & deadline; order state | `get_order` `get_merchant` `get_store` `get_customer` `get_delivery_address` `get_order_constraints` `validate_order` `update_order_status` |
 | **Driver Agent** | which drivers are *eligible* (status, live location, capacity, vehicle compatibility, existing load) — **not** "closest" | `get_available_drivers` `get_all_drivers` `get_driver_location` `get_driver_status` `get_driver_capacity` `get_driver_vehicle` `get_driver_current_route` `update_driver_status` |
-| **Routing Agent** | authoritative driver→pickup→customer route, ETA, distance, traffic penalty; recalculation when conditions change | `calculate_route` `calculate_eta` `calculate_distance` `check_traffic` `get_traffic_conditions` `estimate_delivery_time` `compare_routes` |
+| **Routing Agent** | authoritative Nominatim location → OSRM driving route, ETA and distance; recalculation from the live geographic position | `calculate_route` `calculate_eta` `calculate_distance` `estimate_delivery_time` `compare_routes` |
 | **Dispatch Agent** | score every candidate, compare, pick the best, assign atomically, notify, cancel/reassign | `get_candidate_drivers` `score_driver` `compare_assignments` `assign_order` `notify_driver` `cancel_assignment` `reassign_order` |
 | **Monitoring Agent** | for each active delivery: delayed? deviating? driver gone? deadline at risk? recommend reroute vs reassign | `get_driver_position` `get_order_status` `get_current_route` `detect_delay` `detect_route_deviation` `estimate_new_eta` `trigger_reassignment` |
 | **Coordinator** | the workflow: run the pipeline, react to monitoring findings, choose remediation, drive reroute/reassignment | (delegates to the agents above; optionally consults the LLM advisor) |
 
 ### Deterministic layer (the AI never does this)
 
-- **`engine/routing.ts`** — Dijkstra shortest-*time* path over a 20×20 road grid.
-  Segment cost = `base × trafficMultiplier + delay`; closed roads are impassable.
-  Produces path, distance (km), ETA (min), and a traffic-penalty (ETA − ideal
-  free-flow time).
+- **`engine/geoRouting.ts`** — OSRM driving routes over Nominatim-selected
+  Singapore locations. Requests use OSRM's `[longitude, latitude]` order and
+  stored/displayed path points use `{ lat, lon }`.
 - **`engine/scoring.ts`** — explainable multi-factor score (0–100), sums to the
   product-spec weighting: **ETA 40**, route efficiency 20, deadline feasibility
   15, driver workload 10, spare vehicle capacity 8, raw distance to pickup 7.
@@ -196,7 +189,8 @@ See [SECURITY.md](SECURITY.md). Highlights:
   comparison for both.
 - Role-based access + **per-resource ownership checks** on every read and mutation
   (merchant ↔ merchant, customer ↔ customer, driver ↔ delivery).
-- All input validated server-side; coordinates bounds-checked; id params
+- All input validated server-side; geographic coordinates are restricted to the
+  Singapore map bounds; id params
   regex-checked (kills the injection/IDOR probe surface).
 - Assignment is **atomic and idempotent**: a transaction gated by an
   order-status compare-and-set (`UPDATE … WHERE status IN (…)`, which row-locks)
@@ -213,13 +207,14 @@ See [SECURITY.md](SECURITY.md). Highlights:
 
 `users`, `merchants`, `stores`, `customers`, `drivers`, `driver_status`,
 `driver_locations`, `orders`, `order_items`, `deliveries`, `routes`,
-`assignments`, `road_segments`, `traffic_conditions`, `agent_events`.
+`assignments`, `agent_events`, `agent_runs`, `agent_escalations`.
 
 ## Tests
 
-`npm test` — 36 tests across 6 files:
+`npm test` — 57 tests across 8 files:
 
-- `routing.test.ts` — Dijkstra, closed-road detours, traffic multipliers, chaining
+- `routing.test.ts` — OSRM request coordinate order, Singapore bounds, route
+  geometry conversion, chaining, and reachable-route ranking
 - `scoring.test.ts` — multi-factor scoring, disqualifiers, "not just the closest",
   deterministic tie-breaks
 - `stateMachine.test.ts` — legal/illegal transitions
@@ -228,4 +223,4 @@ See [SECURITY.md](SECURITY.md). Highlights:
   (merchant/customer/driver), input validation, id-shape rejection
 - `dispatch.e2e.test.ts` — full multi-agent pipeline, idempotency, concurrent
   no-double-assign, illegal-transition rejection, driver-offline reassignment,
-  traffic reroute
+  geographic route recalculation

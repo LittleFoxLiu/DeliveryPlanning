@@ -14,6 +14,27 @@ export async function startTestServer(): Promise<TestCtx> {
   await initDb();
   await resetDb();
   await seed({ reset: true });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const inputUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const routeMarker = '/route/v1/driving/';
+    const routeStart = inputUrl.indexOf(routeMarker);
+    if (routeStart >= 0) {
+      const coordinateText = inputUrl.slice(routeStart + routeMarker.length).split('?')[0];
+      const coordinates = coordinateText.split(';').map((value) => value.split(',').map(Number));
+      const [fromLon, fromLat] = coordinates[0] ?? [];
+      const [toLon, toLat] = coordinates[coordinates.length - 1] ?? [];
+      return new Response(JSON.stringify({
+        code: 'Ok',
+        routes: [{
+          distance: 8000,
+          duration: 600,
+          geometry: { coordinates: [[fromLon, fromLat], [(fromLon + toLon) / 2, (fromLat + toLat) / 2], [toLon, toLat]] },
+        }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return realFetch(input, init);
+  };
   const app = createApp();
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -22,7 +43,7 @@ export async function startTestServer(): Promise<TestCtx> {
   return {
     base: `http://127.0.0.1:${port}/api`,
     server,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () => new Promise<void>((resolve) => server.close(() => { globalThis.fetch = realFetch; resolve(); })),
   };
 }
 

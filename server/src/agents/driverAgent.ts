@@ -1,6 +1,7 @@
 import { drivers, deliveries, routes, type DriverFull, type OrderRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
 import { sizeRank, vehicleCanCarry } from './compat.js';
+import type { GeoPoint } from '../geo.js';
 
 const NAME = 'DriverAgent';
 
@@ -9,7 +10,7 @@ export const driverTools = {
   get_all_drivers: (): Promise<DriverFull[]> => drivers.all(),
   get_driver_location: async (driverId: string) => {
     const d = await drivers.byId(driverId);
-    return d && d.lat != null && d.lng != null ? { lat: d.lat, lng: d.lng, at: d.location_at } : undefined;
+    return d && d.latitude != null && d.longitude != null ? { lat: d.latitude, lon: d.longitude, at: d.location_at } : undefined;
   },
   get_driver_status: async (driverId: string) => (await drivers.byId(driverId))?.status,
   get_driver_capacity: async (driverId: string) => {
@@ -32,7 +33,7 @@ export const driverTools = {
 
 export interface Candidate {
   driver: DriverFull;
-  location: { lat: number; lng: number };
+  location: GeoPoint;
   headroom: number;
   activeDeliveries: number;
 }
@@ -60,7 +61,7 @@ export const driverAgent = {
       if (excludeDriverIds.includes(d.id)) reasons.push('excluded_by_coordinator');
       if (d.status === 'break') reasons.push('on_break');
       if (d.status === 'offline') reasons.push('offline');
-      if (d.lat == null || d.lng == null) reasons.push('no_location_fix');
+      if (d.latitude == null || d.longitude == null) reasons.push('no_location_fix');
       const headroom = d.capacity - d.current_order_count;
       if (headroom < 1) reasons.push('at_capacity');
       if (!vehicleCanCarry(d.vehicle_type, d.max_package_size, order.package_size)) {
@@ -73,7 +74,7 @@ export const driverAgent = {
       if (reasons.length === 0) {
         candidates.push({
           driver: d,
-          location: { lat: d.lat as number, lng: d.lng as number },
+          location: { lat: d.latitude as number, lon: d.longitude as number },
           headroom,
           activeDeliveries: activeForDriver,
         });

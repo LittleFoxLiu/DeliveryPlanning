@@ -1,4 +1,5 @@
-import type { DeliveryEstimate } from './routing.js';
+import type { DeliveryEstimate } from './geoRouting.js';
+import { distanceKm as geographicDistanceKm } from '../geo.js';
 
 export type PackageSize = 'small' | 'medium' | 'large';
 export type VehicleType = 'bike' | 'car' | 'van' | 'truck';
@@ -38,8 +39,8 @@ export interface ScoreBreakdown {
     capacityHeadroom: number;
     vehicleCompatible: boolean;
     availability: DriverStatus;
-    routeEfficiencyPct: number; // straight-ish baseline vs actual
-    physicalDistanceUnits: number; // driver -> pickup, grid units (free-flow)
+    routeEfficiencyPct: number; // direct geographic distance vs OSRM distance
+    physicalDistanceKm: number; // OSRM distance from driver to pickup
     workloadRatio: number; // currentOrderCount / capacity
   };
   contributions: Record<string, number>;
@@ -49,16 +50,13 @@ export interface ScoreBreakdown {
 const sizeRank: Record<PackageSize, number> = { small: 1, medium: 2, large: 3 };
 const vehicleMaxSize: Record<VehicleType, PackageSize> = { bike: 'small', car: 'medium', van: 'large', truck: 'large' };
 
-// Temporary driver assignment policy: after eligibility checks, select the
-// shortest geo-routed trip. ETA and traffic are retained as informational
-// fields, but do not influence the driver choice for now.
 const WEIGHTS = {
-  eta: 0,
-  efficiency: 0,
-  deadline: 0,
-  workload: 0,
-  vehicle: 0,
-  distance: 100,
+  eta: 40,
+  efficiency: 20,
+  deadline: 15,
+  workload: 10,
+  vehicle: 8,
+  distance: 7,
 } as const;
 const DISTANCE_SPAN_KM = 40;
 
@@ -101,13 +99,21 @@ export function scoreDriver(
   // soft penalty instead (below), so an on-time driver always wins when one
   // exists. Only a genuinely unreachable route is a hard routing failure.
 
-  const straightBaseline = estimate.reachable
-    ? estimate.toPickup.baselineMinutes + estimate.handlingMinutes + estimate.toDropoff.baselineMinutes
+  const directLegDistance = (route: DeliveryEstimate['toPickup']) => {
+    const first = route.path[0];
+    const last = route.path[route.path.length - 1];
+    return first && last ? geographicDistanceKm(first, last) : route.distanceKm;
+  };
+  const directDistanceKm = estimate.reachable
+    ? directLegDistance(estimate.toPickup) + directLegDistance(estimate.toDropoff)
     : Infinity;
-  const routeEfficiencyPct = estimate.reachable && totalDeliveryMin > 0
-    ? Math.round(clamp((straightBaseline / totalDeliveryMin) * 100, 0, 100))
+  const routedDistanceKm = estimate.reachable
+    ? estimate.toPickup.distanceKm + estimate.toDropoff.distanceKm
+    : Infinity;
+  const routeEfficiencyPct = estimate.reachable && routedDistanceKm > 0
+    ? Math.round(clamp((directDistanceKm / routedDistanceKm) * 100, 0, 100))
     : 0;
-  const physicalDistanceUnits = estimate.reachable
+  const physicalDistanceKm = estimate.reachable
     ? Number(estimate.toPickup.distanceKm.toFixed(2))
     : Infinity;
   const workloadRatio = Number((driver.currentOrderCount / Math.max(driver.capacity, 1)).toFixed(2));
@@ -123,7 +129,7 @@ export function scoreDriver(
     vehicleCompatible,
     availability: driver.status,
     routeEfficiencyPct,
-    physicalDistanceUnits,
+    physicalDistanceKm,
     workloadRatio,
   };
 
@@ -145,13 +151,16 @@ export function scoreDriver(
   const efficiencyScore = routeEfficiencyPct / 100;
   // deadline: >=45 min slack -> full; 0 slack -> 0.35
   const deadlineScore = clamp(0.35 + (deadlineSlackMin / 45) * 0.65, 0, 1);
+  // Lateness remains a soft penalty: a late driver can still be the safest
+  // available option, but an otherwise comparable on-time driver wins.
+  const latePenalty = deadlineSatisfied ? 0 : -Math.min(20, Math.ceil(-deadlineSlackMin / 3));
   // workload: idle driver -> full; at capacity -> 0. `available` beats `on_route`.
   const workloadScore = clamp(1 - workloadRatio, 0, 1) * (driver.status === 'available' ? 1 : 0.7);
   // vehicle: exact fit -> 0.6; roomier vehicle than needed -> up to 1
   const vehicleSlack = sizeRank[vehicleMaxSize[driver.vehicleType]] - sizeRank[order.packageSize];
   const vehicleScore = clamp(0.6 + vehicleSlack * 0.2, 0, 1);
-  // distance: driver already at pickup -> full; across the grid -> 0
-  const distanceScore = clamp(1 - physicalDistanceUnits / DISTANCE_SPAN_KM, 0, 1);
+  // distance: driver already at pickup -> full; longer Singapore routes score lower
+  const distanceScore = clamp(1 - physicalDistanceKm / DISTANCE_SPAN_KM, 0, 1);
 
   const contributions = {
     eta: Number((etaScore * WEIGHTS.eta).toFixed(2)),
@@ -160,6 +169,7 @@ export function scoreDriver(
     workload: Number((workloadScore * WEIGHTS.workload).toFixed(2)),
     vehicle: Number((vehicleScore * WEIGHTS.vehicle).toFixed(2)),
     distance: Number((distanceScore * WEIGHTS.distance).toFixed(2)),
+    latePenalty,
   };
   const score = Math.max(0, Number(Object.values(contributions).reduce((a, b) => a + b, 0).toFixed(2)));
 
@@ -173,7 +183,7 @@ export function scoreDriver(
     `Route efficiency: ${routeEfficiencyPct}%`,
     `Driver workload: ${driver.currentOrderCount}/${driver.capacity} active`,
     `Vehicle: ${driver.vehicleType} (fits ${order.packageSize}, ${vehicleSlack} size${vehicleSlack === 1 ? '' : 's'} of spare)`,
-    `Distance to pickup: ${physicalDistanceUnits} km`,
+    `Distance to pickup: ${physicalDistanceKm} km`,
     `Availability: ${driver.status}`,
   ];
 

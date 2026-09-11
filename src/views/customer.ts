@@ -1,23 +1,22 @@
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../main';
 import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
-import { enableMapTooltips } from '../map';
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
-import type { Point, ProductDto } from '../types';
+import type { GeoPoint as StoredGeoPoint, ProductDto } from '../types';
 import { mountLocationMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
 
 interface Tracking {
-  order: { id: string; status: string; priority: string; deadlineTs: string; pickup?: Point & { address?: string; lat?: number; lon?: number }; dropoff: Point & { address?: string; lat?: number; lon?: number }; items: { name: string; qty: number }[] };
+  order: { id: string; status: string; priority: string; deadlineTs: string; pickup?: StoredGeoPoint & { address?: string; name?: string }; dropoff: StoredGeoPoint & { address?: string }; items: { name: string; qty: number }[] };
   delivery: {
     status: string; etaTs: string | null; estimatedDeliveryMinutes: number | null;
     deliveredAt: string | null; driver: { firstName: string; vehicleType: string } | null;
-    driverPosition: Point | null; driverPositionGeo: { lat: number; lon: number } | null;
-    route?: { path: { toPickup?: Point[]; toDropoff?: Point[] } } | null;
+    driverPosition: StoredGeoPoint | null;
+    route?: { path: { toPickup?: StoredGeoPoint[]; toDropoff?: StoredGeoPoint[] } } | null;
   } | null;
   events: { agent: string; message: string; ts: string }[];
   run?: PublicRun | null;
 }
-interface Merchant { id: string; name: string; stores: { id: string; name: string; pickup?: Point & { address?: string | null; lat?: number | null; lon?: number | null } }[] }
+interface Merchant { id: string; name: string; stores: { id: string; name: string; pickup?: StoredGeoPoint & { address?: string | null } }[] }
 
 let selected: string | null = null;
 let merchants: Merchant[] = [];
@@ -28,7 +27,7 @@ let pickedMerchantId: string | null = null;
 let pickedStoreId: string | null = null;
 let catalog: ProductDto[] = [];
 let cart: Cart = {};
-const draft = { deliveryLat: 17, deliveryLng: 3, priority: 'standard', deadlineTs: '', note: '' };
+const draft: { deliveryLat: number | null; deliveryLng: number | null; priority: string; deadlineTs: string; note: string } = { deliveryLat: null, deliveryLng: null, priority: 'standard', deadlineTs: '', note: '' };
 let deliveryGeo: GeoPoint | null = null;
 let deliveryRoute: GeoRoute | null = null;
 let deliveryAddress = '';
@@ -168,13 +167,13 @@ function stepDelivery(): string {
   const soon = draft.deadlineTs || localDatetimeValue(80 * 60_000);
   return `
     <form class="inline-form" id="wiz-delivery">
-      <label class="full">Delivery address<input id="delivery-search" placeholder="Type an address or search with Nominatim" autocomplete="off" value="${esc(deliveryGeo?.name || deliveryAddress)}"></label>
+      <label class="full">Delivery address<input id="delivery-search" placeholder="Type an address or search with Nominatim" autocomplete="off" value="${esc(deliveryGeo?.address || deliveryGeo?.name || deliveryAddress)}"></label>
       <button type="button" class="btn full" data-open-location-picker>Open map in a new window</button>
       <div id="delivery-results" class="geo-results full"></div>
       <div id="delivery-map" class="geo-map full"></div>
-      <p class="muted full geo-help">Click the map to drop your delivery pin. ${deliveryGeo ? `Selected: <strong>${esc(deliveryGeo.name)}</strong>` : 'No pin selected yet.'}</p>
-      <input name="deliveryLat" type="hidden" value="${draft.deliveryLat}">
-      <input name="deliveryLng" type="hidden" value="${draft.deliveryLng}">
+      <p class="muted full geo-help">Click the map to drop your delivery pin. ${deliveryGeo ? `Selected: <strong>${esc(deliveryGeo.address || deliveryGeo.name || 'Singapore location')}</strong>` : 'No pin selected yet.'}</p>
+      <input name="deliveryLat" type="hidden" value="${deliveryGeo?.lat ?? ''}">
+      <input name="deliveryLng" type="hidden" value="${deliveryGeo?.lon ?? ''}">
       <label>Priority<select name="priority"><option value="standard"${draft.priority === 'standard' ? ' selected' : ''}>standard</option><option value="express"${draft.priority === 'express' ? ' selected' : ''}>express</option></select></label>
       <label>Deadline<input name="deadlineTs" type="datetime-local" value="${esc(soon)}" required></label>
       <label class="full">Note <span class="muted">(optional)</span><input name="note" value="${esc(draft.note)}" placeholder="e.g. leave at the front desk"></label>
@@ -194,7 +193,7 @@ function stepReview(): string {
   return `
     <dl class="kv">
       <dt>Store</dt><dd>${esc(pickedStoreName())}</dd>
-      <dt>Deliver to</dt><dd>${esc(deliveryGeo?.name || deliveryAddress || 'address unavailable')}</dd>
+      <dt>Deliver to</dt><dd>${esc(deliveryGeo?.address || deliveryGeo?.name || deliveryAddress || 'address unavailable')}</dd>
       <dt>Priority</dt><dd>${esc(draft.priority)}</dd>
       <dt>Deadline</dt><dd>${fmtTime(new Date(draft.deadlineTs).toISOString())}</dd>
       ${draft.note ? `<dt>Note</dt><dd>${esc(draft.note)}</dd>` : ''}
@@ -211,22 +210,21 @@ function saveDeliveryForm(el: HTMLElement): void {
   const f = el.querySelector<HTMLFormElement>('#wiz-delivery');
   if (!f) return;
   const fd = new FormData(f);
-  draft.deliveryLat = Number(fd.get('deliveryLat'));
-  draft.deliveryLng = Number(fd.get('deliveryLng'));
+  draft.deliveryLat = deliveryGeo?.lat ?? null;
+  draft.deliveryLng = deliveryGeo?.lon ?? null;
   draft.priority = String(fd.get('priority') || 'standard');
   draft.deadlineTs = String(fd.get('deadlineTs') || '');
   draft.note = String(fd.get('note') || '');
 }
 
 function wire(el: HTMLElement): void {
-  enableMapTooltips(el);
   const liveMap = el.querySelector<HTMLElement>('#customer-live-map');
   if (liveMap && lastTracking?.order.dropoff.lat != null && lastTracking.order.dropoff.lon != null) {
-    const points = [{ lat: lastTracking.order.dropoff.lat, lon: lastTracking.order.dropoff.lon, kind: 'Drop-off', name: lastTracking.order.dropoff.address || 'Delivery address' }];
-    if (lastTracking.order.pickup?.lat != null && lastTracking.order.pickup.lon != null) points.push({ lat: lastTracking.order.pickup.lat, lon: lastTracking.order.pickup.lon, kind: 'Pickup', name: 'Merchant pickup' });
-    if (lastTracking.delivery?.driverPositionGeo) points.push({ lat: lastTracking.delivery.driverPositionGeo.lat, lon: lastTracking.delivery.driverPositionGeo.lon, kind: 'Driver', name: 'Your driver' });
+    const points: Array<GeoPoint & { kind: string; name: string }> = [{ lat: lastTracking.order.dropoff.lat, lon: lastTracking.order.dropoff.lon, kind: 'Drop-off', name: 'Delivery address', address: lastTracking.order.dropoff.address }];
+    if (lastTracking.order.pickup?.lat != null && lastTracking.order.pickup.lon != null) points.push({ lat: lastTracking.order.pickup.lat, lon: lastTracking.order.pickup.lon, kind: 'Pickup', name: 'Merchant pickup', address: lastTracking.order.pickup.address });
+    if (lastTracking.delivery?.driverPosition) points.push({ lat: lastTracking.delivery.driverPosition.lat, lon: lastTracking.delivery.driverPosition.lon, kind: 'Driver', name: 'Your driver' });
     const path = [...(lastTracking.delivery?.route?.path.toPickup ?? []), ...(lastTracking.delivery?.route?.path.toDropoff ?? [])];
-    import('../geoMap').then(({ mountRouteMap }) => mountRouteMap(liveMap, points, path.length > 1 ? [path.map((p) => [p.y, p.x] as [number, number])] : []));
+    import('../geoMap').then(({ mountRouteMap }) => mountRouteMap(liveMap, points, path.length > 1 ? [path.map((p) => [p.lat, p.lon] as [number, number])] : []));
   }
   el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; repaint(el); }));
 
@@ -241,12 +239,13 @@ function wire(el: HTMLElement): void {
   const geoMap = el.querySelector<HTMLElement>('#delivery-map');
   if (geoMap) {
     const store = merchants.flatMap((m) => m.stores).find((s) => s.id === pickedStoreId)?.pickup;
-    const pickup = store?.lat != null && store.lon != null ? { lat: store.lat, lon: store.lon, name: store.address || 'Merchant pickup' } : null;
+    const pickup = store ? { lat: store.lat, lon: store.lon, name: store.address || 'Merchant pickup' } : null;
     mountLocationMap(geoMap, deliveryGeo, async (point) => {
       deliveryGeo = point;
       deliveryRoute = pickup ? await routeWithOsrm(pickup, point).catch(() => null) : null;
-      draft.deliveryLat = geoToGrid(point.lat, 1.22, 1.39);
-      draft.deliveryLng = geoToGrid(point.lon, 103.74, 104.02);
+      deliveryAddress = point.address || point.name || '';
+      draft.deliveryLat = point.lat;
+      draft.deliveryLng = point.lon;
       repaint(el);
     }, deliveryRoute);
   }
@@ -256,11 +255,11 @@ function wire(el: HTMLElement): void {
   search?.addEventListener('input', () => { deliveryAddress = search.value; deliveryGeo = null; deliveryRoute = null; window.clearTimeout(searchTimer); searchTimer = window.setTimeout(async () => {
     if (!results) return; results.textContent = 'Searching Nominatim…';
     try { const found = await searchNominatim(search.value); results.innerHTML = found.map((p) => `<button type="button" data-geo-result="${p.lat},${p.lon}">${esc(p.name)} <small>${esc(p.district || 'Singapore')}</small></button>`).join('') || '<span class="muted">No places found.</span>';
-      results.querySelectorAll<HTMLButtonElement>('[data-geo-result]').forEach((button, index) => button.addEventListener('click', () => { deliveryGeo = found[index]; deliveryAddress = found[index].name; deliveryRoute = null; repaint(el); }));
+      results.querySelectorAll<HTMLButtonElement>('[data-geo-result]').forEach((button, index) => button.addEventListener('click', () => { deliveryGeo = found[index]; deliveryAddress = found[index].address || found[index].name || ''; deliveryRoute = null; draft.deliveryLat = found[index].lat; draft.deliveryLng = found[index].lon; repaint(el); }));
     } catch { results.textContent = 'Address search unavailable.'; }
   }, 500); });
   el.querySelector<HTMLButtonElement>('[data-open-location-picker]')?.addEventListener('click', () => openLocationPicker(deliveryGeo, (point) => {
-    deliveryGeo = point; deliveryRoute = null; draft.deliveryLat = geoToGrid(point.lat, 1.22, 1.39); draft.deliveryLng = geoToGrid(point.lon, 103.74, 104.02); repaint(el);
+    deliveryGeo = point; deliveryAddress = point.address || point.name || ''; deliveryRoute = null; draft.deliveryLat = point.lat; draft.deliveryLng = point.lon; repaint(el);
   }));
   wireCart(el, cart, () => repaint(el));
 
@@ -282,11 +281,9 @@ function wire(el: HTMLElement): void {
       const res = await post<{ order: { id: string } }>('/customer/orders', {
         storeId: pickedStoreId,
         items: cartItems(cart),
-        deliveryLat: draft.deliveryLat,
-        deliveryLng: draft.deliveryLng,
-        deliveryAddress: deliveryGeo?.name || deliveryAddress || undefined,
-        deliveryGeoLat: deliveryGeo?.lat,
-        deliveryGeoLng: deliveryGeo?.lon,
+        deliveryLat: deliveryGeo?.lat,
+        deliveryLng: deliveryGeo?.lon,
+        deliveryAddress: deliveryGeo?.address || deliveryGeo?.name || deliveryAddress || undefined,
         priority: draft.priority,
         note: draft.note || undefined,
         deadlineTs: new Date(draft.deadlineTs).toISOString(),
@@ -304,6 +301,3 @@ function wire(el: HTMLElement): void {
     }
   });
 }
-
-function gridToGeo(x: number, y: number): GeoPoint { return { lat: 1.22 + (y / 20) * .17, lon: 103.74 + (x / 20) * .28, name: 'Store pickup' }; }
-function geoToGrid(value: number, min: number, max: number): number { return Math.max(0, Math.min(20, Math.round(((value - min) / (max - min)) * 20))); }

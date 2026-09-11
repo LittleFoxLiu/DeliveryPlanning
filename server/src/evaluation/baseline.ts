@@ -7,8 +7,8 @@
  * monitoring, no recovery. This is the strawman the autonomous system is
  * measured against.
  */
-import { orders, drivers, deliveries, roads, type OrderRow } from '../repo.js';
-import { calculateRoute, estimateDeliveryTime, type Point } from '../engine/routing.js';
+import { orders, drivers, deliveries, type OrderRow } from '../repo.js';
+import { estimateGeoDelivery } from '../engine/geoRouting.js';
 import { vehicleCanCarry } from '../agents/compat.js';
 import { dispatchTools } from '../agents/dispatchAgent.js';
 
@@ -18,13 +18,12 @@ export async function baselineDispatch(orderId: string): Promise<{ assigned: boo
   try { await orders.setStatus(orderId, 'validated', ['ready', 'created']); } catch { /* already */ }
   try { await orders.setStatus(orderId, 'dispatching', 'validated'); } catch { /* already */ }
 
-  const segs = await roads.segments();
-  const pickup: Point = { x: order.pickup_lat, y: order.pickup_lng };
+  const pickup = { lat: order.pickup_latitude, lon: order.pickup_longitude };
   const fleet = await drivers.all();
 
   const feasible = fleet.filter((d) =>
     (d.status === 'available' || d.status === 'on_route')
-    && d.lat != null
+    && d.latitude != null && d.longitude != null
     && d.capacity - d.current_order_count >= 1
     && vehicleCanCarry(d.vehicle_type, d.max_package_size, order.package_size));
 
@@ -33,13 +32,16 @@ export async function baselineDispatch(orderId: string): Promise<{ assigned: boo
   let best = feasible[0];
   let bestEta = Infinity;
   for (const d of feasible) {
-    const eta = calculateRoute({ x: d.lat as number, y: d.lng as number }, pickup, segs).etaMinutes;
+    const eta = (await estimateGeoDelivery(
+      { lat: d.latitude as number, lon: d.longitude as number }, pickup,
+      { lat: order.delivery_latitude, lon: order.delivery_longitude },
+    )).toPickup.etaMinutes;
     if (eta < bestEta) { bestEta = eta; best = d; }
   }
 
-  const est = estimateDeliveryTime(
-    { x: best.lat as number, y: best.lng as number }, pickup,
-    { x: order.delivery_lat, y: order.delivery_lng }, segs,
+  const est = await estimateGeoDelivery(
+    { lat: best.latitude as number, lon: best.longitude as number }, pickup,
+    { lat: order.delivery_latitude, lon: order.delivery_longitude },
   );
   try {
     const res = await dispatchTools.assign_order({

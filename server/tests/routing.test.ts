@@ -1,60 +1,70 @@
-import { describe, it, expect } from 'vitest';
-import { buildRoadGrid, calculateRoute, estimateDeliveryTime, compareRoutes } from '../src/engine/routing.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { calculateGeoRoute, compareGeoRoutes, estimateGeoDelivery } from '../src/engine/geoRouting.js';
 
-const grid = buildRoadGrid();
+const singaporeA = { lat: 1.3000, lon: 103.8000 };
+const singaporeB = { lat: 1.3500, lon: 103.9000 };
 
-describe('routing engine', () => {
-  it('computes a Manhattan-distance shortest path on a clear grid', () => {
-    const r = calculateRoute({ x: 0, y: 0 }, { x: 3, y: 2 }, grid);
-    expect(r.reachable).toBe(true);
-    expect(r.path[0]).toEqual({ x: 0, y: 0 });
-    expect(r.path.at(-1)).toEqual({ x: 3, y: 2 });
-    expect(r.path.length - 1).toBe(5); // 3 + 2 segments
-    expect(r.distanceKm).toBeCloseTo(2.5);
-    expect(r.etaMinutes).toBe(10); // 5 segments * 2 min base
-    expect(r.trafficPenaltyMinutes).toBe(0);
+afterEach(() => vi.unstubAllGlobals());
+
+describe('OSRM routing engine', () => {
+  it('requests OSRM in longitude,latitude order and returns Leaflet latitude,longitude points', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        code: 'Ok',
+        routes: [{ distance: 12500, duration: 1800, geometry: { coordinates: [[103.8, 1.3], [103.85, 1.325], [103.9, 1.35]] } }],
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const route = await calculateGeoRoute(singaporeA, singaporeB);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/103.8,1.3;103.9,1.35?overview=full&geometries=geojson'),
+      expect.any(Object),
+    );
+    expect(route.reachable).toBe(true);
+    expect(route.path[0]).toEqual({ lat: 1.3, lon: 103.8 });
+    expect(route.path.at(-1)).toEqual({ lat: 1.35, lon: 103.9 });
+    expect(route.distanceKm).toBeCloseTo(12.5);
+    expect(route.etaMinutes).toBe(30);
   });
 
-  it('routes around a closed segment and reports the detour as a penalty', () => {
-    const g = grid.map((s) => (s.ax === 0 && s.ay === 0 && s.bx === 1 && s.by === 0 ? { ...s, status: 'closed' as const } : s));
-    const r = calculateRoute({ x: 0, y: 0 }, { x: 1, y: 0 }, g);
-    expect(r.reachable).toBe(true);
-    expect(r.path.length - 1).toBe(3); // 3-segment detour
-    expect(r.baselineMinutes).toBe(2); // ideal free-flow for a 1-segment hop
-    expect(r.trafficPenaltyMinutes).toBe(4); // 6 min detour - 2 min ideal
+  it('rejects locations outside the Singapore map scope', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const route = await calculateGeoRoute({ lat: 1.3, lon: 103.8 }, { lat: 51.5, lon: -0.1 });
+
+    expect(route.reachable).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('reports unreachable when every path is blocked', () => {
-    const g = grid.map((s) => {
-      const touchesOrigin = (s.ax === 0 && s.ay === 0) || (s.bx === 0 && s.by === 0);
-      return touchesOrigin ? { ...s, status: 'closed' as const } : s;
-    });
-    const r = calculateRoute({ x: 0, y: 0 }, { x: 5, y: 5 }, g);
-    expect(r.reachable).toBe(false);
-    expect(r.etaMinutes).toBe(Infinity);
+  it('chains driver, pickup, and drop-off legs through OSRM', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        code: 'Ok',
+        routes: [{ distance: 4000, duration: 600, geometry: { coordinates: [[103.8, 1.3], [103.9, 1.35]] } }],
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const estimate = await estimateGeoDelivery(singaporeA, singaporeB, singaporeA);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(estimate.reachable).toBe(true);
+    expect(estimate.totalMinutes).toBe(23);
+    expect(estimate.totalDistanceKm).toBe(8);
   });
 
-  it('adds heavy-traffic multiplier and per-segment delay to ETA', () => {
-    // heavy "wall" of horizontal segments at x=2 forces one costly crossing
-    const g = grid.map((s) => (s.ay === s.by && s.ax === 2
-      ? { ...s, status: 'heavy' as const, delay_minutes: 5 } : s));
-    const r = calculateRoute({ x: 0, y: 0 }, { x: 5, y: 0 }, g);
-    // 4 clear (2*4) + 1 heavy crossing (2*3 + 5 = 11) = 19
-    expect(r.etaMinutes).toBe(19);
-    expect(r.baselineMinutes).toBe(10);
-    expect(r.trafficPenaltyMinutes).toBe(9);
-  });
+  it('ranks only reachable geographic routes by ETA', () => {
+    const result = compareGeoRoutes([
+      { label: 'slow', result: { path: [], distanceKm: 8, etaMinutes: 20, reachable: true } },
+      { label: 'fast', result: { path: [], distanceKm: 5, etaMinutes: 10, reachable: true } },
+      { label: 'unreachable', result: { path: [], distanceKm: 0, etaMinutes: Infinity, reachable: false } },
+    ]);
 
-  it('estimateDeliveryTime chains driver -> pickup -> dropoff with handling time', () => {
-    const est = estimateDeliveryTime({ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 3 }, grid);
-    expect(est.reachable).toBe(true);
-    expect(est.totalMinutes).toBe(est.toPickup.etaMinutes + est.handlingMinutes + est.toDropoff.etaMinutes);
-  });
-
-  it('compareRoutes ranks by ETA and ignores unreachable candidates', () => {
-    const a = calculateRoute({ x: 0, y: 0 }, { x: 1, y: 0 }, grid);
-    const b = calculateRoute({ x: 0, y: 0 }, { x: 6, y: 6 }, grid);
-    const cmp = compareRoutes([{ label: 'near', result: a }, { label: 'far', result: b }]);
-    expect(cmp.best).toBe('near');
+    expect(result.map((item) => item.label)).toEqual(['fast', 'slow']);
   });
 });

@@ -2,7 +2,6 @@ import type { OrderDto, DriverDto, AgentEvent } from '../types';
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil } from '../ui';
-import { enableMapTooltips } from '../map';
 import { mountOverviewMap, searchNominatim } from '../geoMap';
 import { renderAdminOps } from './adminOps';
 import { renderAdminEval } from './adminEval';
@@ -12,8 +11,6 @@ interface Overview {
   drivers: DriverDto[];
   deliveries: (OrderDto['delivery'] & { route?: unknown })[];
   assignments: { driverId: string; score: number; reasoning: Reasoning }[];
-  traffic: { id: string; area: string; status: string; delay_minutes: number }[];
-  roadIncidents: { id: string; status: string; delay: number }[];
   events: AgentEvent[];
   llmEnabled: boolean;
 }
@@ -84,7 +81,7 @@ function overviewPage(ov: Overview): string {
       <div class="stat"><div class="n">${ov.orders.length}</div><div class="l">Active orders</div></div>
       <div class="stat"><div class="n">${availableDrivers}/${ov.drivers.length}</div><div class="l">Drivers available</div></div>
       <div class="stat"><div class="n">${activeDeliveries}</div><div class="l">Deliveries in flight</div></div>
-      <div class="stat"><div class="n">${ov.roadIncidents.length}</div><div class="l">Road incidents</div></div>
+      <div class="stat"><div class="n">OSRM</div><div class="l">Routing provider</div></div>
     </div>
 
     <div class="grid2">
@@ -168,7 +165,7 @@ function addToNetworkCard(): string {
           <label>Business name<input name="businessName" required></label>
           <label>Store name<input name="storeName" required></label>
           <label>Store address<input name="storeAddress" data-address-search required placeholder="Search with Nominatim"></label>
-          <input name="storeGeoLat" type="hidden"><input name="storeGeoLng" type="hidden">
+          <input name="storeLat" type="hidden"><input name="storeLng" type="hidden">
           <label>Contact name<input name="contactName" required></label>
           <label>Login email<input name="email" type="email" required></label>
           <button class="btn primary full" type="submit">Add merchant</button>
@@ -180,8 +177,7 @@ function addToNetworkCard(): string {
           <label>Capacity<input name="capacity" type="number" min="1" max="20" value="4" required></label>
           <label>Fits<select name="maxPackageSize"><option>large</option><option>medium</option><option>small</option></select></label>
           <label>Starting address<input name="address" data-address-search required placeholder="Search with Nominatim"></label>
-          <input name="geoLat" type="hidden"><input name="geoLng" type="hidden">
-          <input name="lat" type="hidden" value="10"><input name="lng" type="hidden" value="10">
+          <input name="lat" type="hidden"><input name="lng" type="hidden">
           <label>Login email<input name="email" type="email" required></label>
           <button class="btn primary full" type="submit">Add driver</button>
         </form>
@@ -196,43 +192,52 @@ function addToNetworkCard(): string {
 }
 
 function driverRow(d: DriverDto): string {
+  const position = d.location
+    ? `${esc(d.location.address || 'Current geographic position')}<br><span class="muted">${d.location.lat.toFixed(6)}, ${d.location.lon.toFixed(6)}</span>`
+    : '—';
   return `<tr>
     <td><strong>${esc(d.name)}</strong></td>
     <td>${esc(d.vehicleType)} · ${d.maxPackageSize}</td>
     <td>${statusChip(d.status)}</td>
     <td>${d.currentOrderCount}/${d.capacity}</td>
-    <td>${esc(d.geoLocation?.address || (d.location ? 'Current location' : '—'))}</td>
+    <td>${position}</td>
     <td>${d.status !== 'offline' ? `<button class="btn sm" data-offline="${esc(d.id)}">Take offline</button>` : ''}</td>
   </tr>`;
 }
 
 function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
-  enableMapTooltips(el);
   const overviewMap = el.querySelector<HTMLElement>('#admin-overview-map');
   if (overviewMap) {
-    const points: Array<{ lat: number; lon: number; name: string; kind: string; detail?: string }> = [];
-    ov.drivers.forEach((d) => { if (d.geoLocation) points.push({ ...d.geoLocation, name: d.name, kind: 'Driver', detail: `${d.status} · ${d.currentOrderCount}/${d.capacity}` }); });
+    const points: Array<{ lat: number; lon: number; name: string; kind: string; address?: string | null; detail?: string }> = [];
+    ov.drivers.forEach((d) => { if (d.location) points.push({ ...d.location, name: d.name, kind: 'Driver', detail: `${d.status} · ${d.currentOrderCount}/${d.capacity}` }); });
     const paths: [number, number][][] = [];
     ov.orders.forEach((o) => {
-      if (o.pickup.lat != null && o.pickup.lon != null) points.push({ lat: o.pickup.lat, lon: o.pickup.lon, name: o.storeName || 'Merchant pickup', kind: 'Pickup', detail: o.pickup.address || o.code });
-      if (o.dropoff.lat != null && o.dropoff.lon != null) points.push({ lat: o.dropoff.lat, lon: o.dropoff.lon, name: o.customerName, kind: 'Drop-off', detail: o.dropoff.address || `${o.code} · ${o.status}` });
+      if (o.pickup.lat != null && o.pickup.lon != null) points.push({ lat: o.pickup.lat, lon: o.pickup.lon, name: o.storeName || 'Merchant pickup', kind: 'Pickup', address: o.pickup.address, detail: o.pickup.address || o.code });
+      if (o.dropoff.lat != null && o.dropoff.lon != null) points.push({ lat: o.dropoff.lat, lon: o.dropoff.lon, name: o.customerName, kind: 'Drop-off', address: o.dropoff.address, detail: o.dropoff.address || `${o.code} · ${o.status}` });
       const route = o.delivery?.route;
-      const path = route ? [...(route.path.toPickup ?? []), ...(route.path.toDropoff ?? [])].map((p) => [p.y, p.x] as [number, number]) : [];
+      const path = route ? [...(route.path.toPickup ?? []), ...(route.path.toDropoff ?? [])].map((p) => [p.lat, p.lon] as [number, number]) : [];
       if (path.length > 1) paths.push(path);
     });
     mountOverviewMap(overviewMap, points, paths);
   }
   const repaint = () => renderAdmin(el, null, currentPage);
   el.querySelectorAll<HTMLInputElement>('[data-address-search]').forEach((input) => {
-    input.addEventListener('change', async () => {
-      const result = (await searchNominatim(input.value).catch(() => []))[0];
-      if (!result) return;
-      input.value = result.name;
+    input.addEventListener('input', () => {
       const form = input.form;
       if (!form) return;
       const prefix = input.name === 'storeAddress' ? 'store' : '';
-      (form.elements.namedItem(`${prefix}GeoLat`) as HTMLInputElement).value = String(result.lat);
-      (form.elements.namedItem(`${prefix}GeoLng`) as HTMLInputElement).value = String(result.lon);
+      (form.elements.namedItem(`${prefix}Lat`) as HTMLInputElement).value = '';
+      (form.elements.namedItem(`${prefix}Lng`) as HTMLInputElement).value = '';
+    });
+    input.addEventListener('change', async () => {
+      const result = (await searchNominatim(input.value).catch(() => []))[0];
+      if (!result) return;
+      input.value = result.address || result.name || '';
+      const form = input.form;
+      if (!form) return;
+      const prefix = input.name === 'storeAddress' ? 'store' : '';
+      (form.elements.namedItem(`${prefix}Lat`) as HTMLInputElement).value = String(result.lat);
+      (form.elements.namedItem(`${prefix}Lng`) as HTMLInputElement).value = String(result.lon);
     });
   });
   el.querySelectorAll<HTMLButtonElement>('[data-toggle]').forEach((b) => b.addEventListener('click', () => {
@@ -258,14 +263,13 @@ function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   };
   addForm('add-merchant', '/admin/merchants', 'Merchant', (fd) => ({
     businessName: fd.get('businessName'), storeName: fd.get('storeName'),
-    storeAddress: fd.get('storeAddress'), storeGeoLat: Number(fd.get('storeGeoLat')), storeGeoLng: Number(fd.get('storeGeoLng')),
-    storeLat: 10, storeLng: 10,
+    storeAddress: fd.get('storeAddress'), storeLat: Number(fd.get('storeLat')), storeLng: Number(fd.get('storeLng')),
     contactName: fd.get('contactName'), email: fd.get('email'),
   }));
   addForm('add-driver', '/admin/drivers', 'Driver', (fd) => ({
     name: fd.get('name'), vehicleType: fd.get('vehicleType'), capacity: Number(fd.get('capacity')),
     maxPackageSize: fd.get('maxPackageSize'), lat: Number(fd.get('lat')), lng: Number(fd.get('lng')), address: fd.get('address'),
-    geoLat: Number(fd.get('geoLat')), geoLng: Number(fd.get('geoLng')), email: fd.get('email'),
+    email: fd.get('email'),
   }));
   addForm('add-customer', '/admin/customers', 'Customer', (fd) => ({ name: fd.get('name'), email: fd.get('email') }));
   el.querySelector('[data-act="tick"]')?.addEventListener('click', () => act(() => post('/sim/tick'), 'Advanced simulation one tick'));
@@ -276,19 +280,6 @@ function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   el.querySelectorAll<HTMLButtonElement>('[data-offline]').forEach((b) => b.addEventListener('click', () =>
     act(() => post(`/sim/driver/${b.dataset.offline}/offline`), 'Driver taken offline — watch the Monitoring Agent')));
 
-  const firstAssigned = ov.orders.find((o) => o.delivery?.driverId
-    && ['assigned', 'en_route_pickup', 'picked_up', 'en_route_drop'].includes(o.delivery.status));
-  const head = el.querySelector('.page-head .pill-row');
-  if (firstAssigned && head && !head.querySelector('[data-act="traffic"]')) {
-    const btn = document.createElement('button');
-    btn.className = 'btn';
-    btn.dataset.act = 'traffic';
-    btn.textContent = '⚠ Simulate traffic incident';
-    btn.addEventListener('click', () => act(
-      () => post('/sim/traffic', { blockRouteOf: firstAssigned.id }),
-      'Road closed on the active route — watch the agents recover'));
-    head.insertBefore(btn, head.children[1]);
-  }
 }
 
 async function act(fn: () => Promise<unknown>, okMsg: string): Promise<void> {

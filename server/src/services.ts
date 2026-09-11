@@ -1,15 +1,14 @@
 import { tx } from './db.js';
-import { deliveries, orders, drivers, routes, roads, stores, type DeliveryRow } from './repo.js';
+import { deliveries, orders, drivers, routes, stores, type DeliveryRow } from './repo.js';
 import { emitAgentEvent } from './events.js';
-import { nowIso, conflict, badRequest } from './util.js';
+import { nowIso, conflict } from './util.js';
 import { coordinator } from './agents/coordinator.js';
-import type { Point } from './engine/routing.js';
+import { distanceKm, type GeoPoint } from './geo.js';
 
 type DriverAction = 'accept' | 'picked_up' | 'delivered';
 
-/** Driver-reported progress. Deterministic state transitions with ownership
- *  already checked by the route handler. Confirming pickup / delivery also
- *  moves the driver onto that waypoint (they can only be there to do it). */
+/** Driver-reported progress. Waypoint coordinates are the persisted Nominatim
+ * locations and are never converted to another coordinate system. */
 export function driverProgress(deliveryId: string, driverId: string, action: DriverAction): Promise<DeliveryRow> {
   return tx(async () => {
     const delivery = await deliveries.byId(deliveryId);
@@ -22,13 +21,13 @@ export function driverProgress(deliveryId: string, driverId: string, action: Dri
       await emitAgentEvent({ agent: 'Driver', eventType: 'delivery_accepted', orderId: order.id, deliveryId, driverId, message: `Driver ${driverId} accepted the delivery for order ${order.id}` });
     } else if (action === 'picked_up') {
       const store = await stores.byId(order.store_id);
-      await drivers.recordLocation(driverId, order.pickup_lat, order.pickup_lng, store?.address, store?.geo_lat, store?.geo_lng);
+      await drivers.recordLocation(driverId, order.pickup_latitude, order.pickup_longitude, store?.address);
       await deliveries.setStatus(deliveryId, 'picked_up', ['en_route_pickup', 'assigned']);
       await deliveries.update(deliveryId, { pickup_at: nowIso() });
       try { await orders.setStatus(order.id, 'picked_up', ['assigned', 'dispatching']); } catch { /* keep */ }
-      await emitAgentEvent({ agent: 'Driver', eventType: 'package_picked_up', orderId: order.id, deliveryId, driverId, message: `Driver ${driverId} picked up order ${order.id} at the merchant (${order.pickup_lat}, ${order.pickup_lng})` });
+      await emitAgentEvent({ agent: 'Driver', eventType: 'package_picked_up', orderId: order.id, deliveryId, driverId, message: `Driver ${driverId} picked up order ${order.id} at the merchant (${order.pickup_latitude}, ${order.pickup_longitude})` });
     } else {
-      await drivers.recordLocation(driverId, order.delivery_lat, order.delivery_lng, order.delivery_address, order.delivery_geo_lat, order.delivery_geo_lng);
+      await drivers.recordLocation(driverId, order.delivery_latitude, order.delivery_longitude, order.delivery_address);
       await deliveries.setStatus(deliveryId, 'delivered', ['picked_up', 'en_route_drop']);
       const assignedMs = delivery.assigned_at ? Date.parse(delivery.assigned_at) : Date.now();
       const actual = Number(((Date.now() - assignedMs) / 60_000).toFixed(1));
@@ -43,79 +42,62 @@ export function driverProgress(deliveryId: string, driverId: string, action: Dri
   });
 }
 
-const segKey = (a: Point, b: Point) => {
-  const pts = [a, b].sort((m, n) => (m.x - n.x) || (m.y - n.y));
-  return `${pts[0].x},${pts[0].y}-${pts[1].x},${pts[1].y}`;
-};
-
-async function findRoadId(a: Point, b: Point): Promise<string | undefined> {
-  return (await roads.all()).find((r) => segKey({ x: r.ax, y: r.ay }, { x: r.bx, y: r.by }) === segKey(a, b))?.id;
-}
-
 export interface TickResult {
-  moved: { deliveryId: string; driverId: string; from: Point; to: Point; arrived?: string }[];
+  moved: { deliveryId: string; driverId: string; from: GeoPoint; to: GeoPoint; arrived?: string }[];
   monitoring: Awaited<ReturnType<typeof coordinator.runMonitoringCycle>>;
 }
 
-/** Simulator: advance every in-flight driver one grid step along their active
- *  route, auto-transitioning on arrival, then run one monitoring cycle.
- *  `monitor: false` skips the monitoring/remediation pass (used for the
- *  no-autonomy baseline in the evaluation centre). */
+/** Demo simulator: advance each driver along the stored OSRM geometry by a
+ * small number of geometry points, then run the monitoring cycle. */
 export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<TickResult> {
   const moved: TickResult['moved'] = [];
-
   const active = (await deliveries.active()).filter((d) => ['assigned', 'en_route_pickup', 'picked_up', 'en_route_drop'].includes(d.status));
+
   for (const delivery of active) {
     if (!delivery.driver_id) continue;
     const route = await routes.activeForDelivery(delivery.id);
-    if (!route) continue;
     const driver = await drivers.byId(delivery.driver_id);
-    if (!driver || driver.lat == null || driver.status === 'offline') continue;
     const order = await orders.byId(delivery.order_id);
-    if (!order) continue;
-    const pos: Point = { x: driver.lat, y: driver.lng as number };
-    const realPos: Point = driver.geo_lat != null && driver.geo_lng != null
-      ? { x: driver.geo_lng, y: driver.geo_lat } : pos;
+    if (!route || !driver || driver.latitude == null || driver.longitude == null || driver.status === 'offline' || !order) continue;
 
-    const paths = route.path_json ?? {};
+    const from: GeoPoint = { lat: driver.latitude, lon: driver.longitude };
     const phasePickup = ['assigned', 'en_route_pickup'].includes(delivery.status);
-    const path = (phasePickup ? paths.toPickup : paths.toDropoff) ?? [];
-    if (path.length < 1) continue;
+    const path = (phasePickup ? route.path_json.toPickup : route.path_json.toDropoff) ?? [];
+    if (path.length === 0) continue;
 
-    let idx = 0; let best = Infinity;
-    path.forEach((p, i) => { const d = Math.hypot(p.x - realPos.x, p.y - realPos.y); if (d <= best) { best = d; idx = i; } });
-    let next = path[Math.min(idx + 1, path.length - 1)];
-    const target = path[path.length - 1];
+    let nearest = 0;
+    let best = Infinity;
+    path.forEach((point, index) => {
+      const d = distanceKm(point, from);
+      if (d <= best) { best = d; nearest = index; }
+    });
+    const step = Math.max(1, Math.ceil(path.length / 8));
+    const nextIndex = Math.min(nearest + step, path.length - 1);
+    let to = path[nextIndex];
+    const target = phasePickup
+      ? { lat: order.pickup_latitude, lon: order.pickup_longitude }
+      : { lat: order.delivery_latitude, lon: order.delivery_longitude };
+    const arrived = nextIndex === path.length - 1;
+    if (arrived) to = target;
 
-    // The real waypoint (unsnapped). When the step lands the driver on the last
-    // path node, place them exactly on the pickup/customer so the arrival check
-    // in driverProgress always passes.
-    const store = phasePickup ? await stores.byId(order.store_id) : null;
-    const waypoint: Point = phasePickup && store?.geo_lat != null && store.geo_lng != null
-      ? { x: store.geo_lng, y: store.geo_lat }
-      : !phasePickup && order.delivery_geo_lat != null && order.delivery_geo_lng != null
-        ? { x: order.delivery_geo_lng, y: order.delivery_geo_lat }
-        : phasePickup ? { x: order.pickup_lat, y: order.pickup_lng } : { x: order.delivery_lat, y: order.delivery_lng };
-    const atTarget = Math.hypot(next.x - target.x, next.y - target.y) < 0.5;
-    if (atTarget) next = waypoint;
-
-    const nextGrid = next === waypoint || (driver.geo_lat == null && driver.geo_lng == null)
-      ? next : { x: geoToGrid(next.x, 103.74, 104.02), y: geoToGrid(next.y, 1.22, 1.39) };
-    await drivers.recordLocation(delivery.driver_id, nextGrid.x, nextGrid.y, undefined,
-      next === waypoint ? next.y : next.y, next === waypoint ? next.x : next.x);
-    const record: TickResult['moved'][number] = { deliveryId: delivery.id, driverId: delivery.driver_id, from: pos, to: next };
-    if (atTarget && phasePickup) {
+    // A simulated intermediate waypoint is OSRM geometry, not a Nominatim
+    // address. Clear the address so the UI cannot display the previous
+    // geocoded location beside a new coordinate.
+    const address = arrived
+      ? phasePickup ? (await stores.byId(order.store_id))?.address : order.delivery_address
+      : null;
+    await drivers.recordLocation(delivery.driver_id, to.lat, to.lon, address);
+    const record: TickResult['moved'][number] = { deliveryId: delivery.id, driverId: delivery.driver_id, from, to };
+    if (arrived && phasePickup) {
       try {
-        await driverProgress(delivery.id, delivery.driver_id, delivery.status === 'assigned' ? 'accept' : 'picked_up');
-        if ((await deliveries.byId(delivery.id))?.status === 'en_route_pickup') {
-          await driverProgress(delivery.id, delivery.driver_id, 'picked_up');
-        }
+        if (delivery.status === 'assigned') await driverProgress(delivery.id, delivery.driver_id, 'accept');
+        if ((await deliveries.byId(delivery.id))?.status === 'en_route_pickup') await driverProgress(delivery.id, delivery.driver_id, 'picked_up');
         record.arrived = 'pickup';
       } catch { /* ignore transition races */ }
-    } else if (atTarget && !phasePickup) {
-      try { await driverProgress(delivery.id, delivery.driver_id, 'delivered'); record.arrived = 'dropoff'; } catch { /* ignore */ }
+    } else if (arrived) {
+      try { await driverProgress(delivery.id, delivery.driver_id, 'delivered'); record.arrived = 'dropoff'; } catch { /* ignore transition races */ }
     } else if (phasePickup && delivery.status === 'assigned') {
-      try { await driverProgress(delivery.id, delivery.driver_id, 'accept'); } catch { /* ignore */ }
+      try { await driverProgress(delivery.id, delivery.driver_id, 'accept'); } catch { /* ignore transition races */ }
     }
     moved.push(record);
   }
@@ -124,111 +106,4 @@ export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<Ti
     ? { cycleId: '', findings: [], actions: [] }
     : await coordinator.runMonitoringCycle();
   return { moved, monitoring };
-}
-
-function geoToGrid(value: number, min: number, max: number): number {
-  return Math.max(0, Math.min(20, Math.round(((value - min) / (max - min)) * 20)));
-}
-
-export interface TrafficChange { closed: string[]; updated: string[] }
-
-/** Simulator: inject a road/traffic change. Either explicit segments or
- *  `blockRouteOf` (closes a segment on that order's remaining route). */
-export function injectTraffic(input: {
-  segments?: string[];
-  status?: 'clear' | 'moderate' | 'heavy' | 'closed';
-  delayMinutes?: number;
-  blockRouteOf?: string;
-  /** minor: slow one segment (recoverable → reroute). major: close it + choke
-   *  the surrounding block (usually blows the deadline → reassignment). */
-  severity?: 'minor' | 'major';
-}): Promise<TrafficChange> {
-  // With no explicit target, create a small reproducible demo incident rather
-  // than touching the whole network. This makes the traffic feature useful
-  // from a console/API smoke test as well as from the active-route button.
-  const status = input.status ?? (input.severity ? 'closed' : 'heavy');
-  const delay = input.delayMinutes ?? (status === 'heavy' ? 12 : status === 'moderate' ? 5 : 0);
-  const changed: string[] = [];
-
-  return tx(async () => {
-    let segmentIds = input.segments ?? [];
-
-    if (!input.blockRouteOf && segmentIds.length === 0) {
-      const candidates = (await roads.all()).filter((road) => road.status !== 'closed');
-      segmentIds = candidates.sort(() => Math.random() - 0.5).slice(0, Math.min(3, candidates.length)).map((road) => road.id);
-    }
-
-    if (input.blockRouteOf) {
-      const order = await orders.byId(input.blockRouteOf);
-      if (!order) throw badRequest('order not found for blockRouteOf');
-      const delivery = await deliveries.byOrderId(order.id);
-      if (!delivery) throw badRequest('order has no active delivery');
-      const route = await routes.activeForDelivery(delivery.id);
-      if (!route) throw badRequest('delivery has no active route');
-      const paths = route.path_json ?? {};
-      const driver = delivery.driver_id ? await drivers.byId(delivery.driver_id) : undefined;
-      const pos: Point = driver && driver.lat != null ? { x: driver.lat, y: driver.lng as number } : { x: route.origin_lat, y: route.origin_lng };
-      const phasePickup = ['assigned', 'en_route_pickup'].includes(delivery.status);
-      const path = (phasePickup ? paths.toPickup : paths.toDropoff) ?? [];
-      let idx = 0; let bestD = Infinity;
-      path.forEach((p, i) => { const d = Math.hypot(p.x - pos.x, p.y - pos.y); if (d < bestD) { bestD = d; idx = i; } });
-      const a = path[Math.min(idx + 1, path.length - 2)];
-      const b = path[Math.min(idx + 2, path.length - 1)];
-      if (a && b && (a.x !== b.x || a.y !== b.y)) {
-        const rid = await findRoadId(a, b);
-        if (rid) segmentIds = [rid];
-      }
-      if (segmentIds.length === 0) throw badRequest('could not locate a blockable segment on the remaining route');
-
-      const primary = (await roads.byId(segmentIds[0]))!;
-      const severity = input.severity ?? 'major';
-      if (severity === 'minor') {
-        // slow a few consecutive segments on the route so the delay is real but
-        // a detour still beats the deadline
-        for (let k = idx + 1; k < Math.min(idx + 4, path.length); k++) {
-          const rid = await findRoadId(path[k - 1], path[k]);
-          if (rid && !changed.includes(rid)) { await roads.setStatus(rid, 'heavy', 10); changed.push(rid); }
-        }
-        if (!changed.length) { await roads.setStatus(primary.id, 'heavy', 10); changed.push(primary.id); }
-        await emitAgentEvent({
-          agent: 'TrafficFeed', eventType: 'traffic_updated',
-          message: `Heavy traffic building on the active route near ${primary.id} (+10 min) — a recoverable delay`,
-          data: { segments: changed, status: 'heavy', incidentType: 'congestion' },
-        });
-        return { closed: [], updated: changed };
-      }
-      await roads.setStatus(primary.id, 'closed', 0);
-      changed.push(primary.id);
-      const nodes = new Set([`${primary.ax},${primary.ay}`, `${primary.bx},${primary.by}`]);
-      for (const r of await roads.all()) {
-        if (r.id === primary.id || r.status === 'closed') continue;
-        if (nodes.has(`${r.ax},${r.ay}`) || nodes.has(`${r.bx},${r.by}`)) {
-          await roads.setStatus(r.id, 'heavy', 15);
-          changed.push(r.id);
-        }
-      }
-      await emitAgentEvent({
-        agent: 'TrafficFeed', eventType: 'traffic_updated',
-        message: `Traffic incident on ${primary.id} — road closed and surrounding streets heavily congested (+15 min)`,
-        data: { segments: changed, closed: [primary.id], incidentType: 'accident' },
-      });
-      return { closed: [primary.id], updated: changed };
-    }
-
-    for (const sid of segmentIds) {
-      const road = await roads.byId(sid);
-      if (!road) throw badRequest(`unknown road segment ${sid}`);
-      await roads.setStatus(sid, status, delay);
-      changed.push(sid);
-    }
-
-    await emitAgentEvent({
-      agent: 'TrafficFeed', eventType: 'traffic_updated',
-      message: status === 'closed'
-        ? `Road closure reported on ${changed.length} segment(s): ${changed.join(', ')}`
-        : `Traffic now ${status} on ${changed.length} segment(s) (+${delay} min): ${changed.join(', ')}`,
-      data: { segments: changed, status, delay },
-    });
-    return { closed: status === 'closed' ? changed : [], updated: changed };
-  });
 }

@@ -105,8 +105,8 @@ export async function validateAction(proposal: AgentProposal, ctx: ActionContext
       });
       checks.push({
         name: 'driver_has_position',
-        passed: d.lat != null,
-        detail: d.lat != null ? `at (${d.lat}, ${d.lng})` : 'no location fix',
+        passed: d.latitude != null,
+        detail: d.latitude != null ? `at ${d.latitude.toFixed(6)}, ${d.longitude?.toFixed(6)}` : 'no location fix',
       });
     }
   }

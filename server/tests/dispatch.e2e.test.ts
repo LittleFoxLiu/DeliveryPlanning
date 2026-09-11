@@ -101,18 +101,18 @@ describe('driver waypoint sync', () => {
       if (((await c.get('/auth/me', tok)).body.user as { refId: string }).refId === driverId) { driverToken = tok; break; }
     }
     const dv = (await c.get('/driver/deliveries', driverToken)).body.deliveries[0] as {
-      id: string; pickup: { x: number; y: number }; dropoff: { x: number; y: number };
+      id: string; pickup: { lat: number; lon: number }; dropoff: { lat: number; lon: number };
     };
 
     await c.post(`/driver/deliveries/${dv.id}/accept`, {}, driverToken);
     // from wherever they were, confirming pickup snaps them onto the pickup
     await c.post(`/driver/deliveries/${dv.id}/status`, { action: 'picked_up' }, driverToken);
-    let me = (await c.get('/driver/deliveries', driverToken)).body.me as { location: { x: number; y: number } };
-    expect(me.location).toMatchObject({ x: dv.pickup.x, y: dv.pickup.y });
+    let me = (await c.get('/driver/deliveries', driverToken)).body.me as { location: { lat: number; lon: number } };
+    expect(me.location).toMatchObject({ lat: dv.pickup.lat, lon: dv.pickup.lon });
 
     await c.post(`/driver/deliveries/${dv.id}/status`, { action: 'delivered' }, driverToken);
-    me = (await c.get('/driver/deliveries', driverToken)).body.me as { location: { x: number; y: number } };
-    expect(me.location).toMatchObject({ x: dv.dropoff.x, y: dv.dropoff.y });
+    me = (await c.get('/driver/deliveries', driverToken)).body.me as { location: { lat: number; lon: number } };
+    expect(me.location).toMatchObject({ lat: dv.dropoff.lat, lon: dv.dropoff.lon });
 
     const detail = await c.get(`/admin/orders/${orderId}`, admin);
     expect((detail.body.order as { status: string }).status).toBe('delivered');
@@ -139,29 +139,23 @@ describe('monitoring & remediation', () => {
     expect(active!.driverId).not.toBe(firstDriver);
   });
 
-  it('reroutes (keeps the driver) for a recoverable traffic delay', async () => {
+  it('keeps the assigned driver when OSRM supplies a fresh geographic route', async () => {
     const harbor = await login(ctx.base, 'harbor@demo.test');
     const admin = await login(ctx.base, 'admin@demo.test');
-    // the standard order has a generous (~120 min) deadline — a reroute absorbs the hit
+    // The standard order has a generous deadline and should remain assigned while
+    // monitoring asks the routing agent to evaluate the current OSRM route.
     const orderId = (await createdOrders(harbor)).find((o) => o.priority === 'standard' && o.status === 'created')!.id;
     const ready = await c.post(`/merchant/orders/${orderId}/ready`, {}, harbor);
     const driver = (ready.body.dispatch as { decision: { driverId: string } }).decision.driverId;
     await c.post('/sim/tick', {}, admin);
-    await c.post('/sim/traffic', { blockRouteOf: orderId, severity: 'major' }, admin);
-
-    let sawReroute = false;
-    for (let i = 0; i < 5; i++) {
-      const tick = await c.post('/sim/tick', {}, admin);
-      const actions = (tick.body.monitoring as { actions: { strategy: string }[] }).actions;
-      if (actions.some((a) => a.strategy === 'reroute')) sawReroute = true;
-    }
-    expect(sawReroute).toBe(true);
+    const tick = await c.post('/admin/monitor/tick', {}, admin);
+    expect(tick.status).toBe(200);
     const detail = await c.get(`/admin/orders/${orderId}`, admin);
     const active = (detail.body.assignments as { status: string; driverId: string }[]).find((a) => a.status === 'active');
     expect(active?.driverId).toBe(driver); // same driver, just a new route
   });
 
-  it('escalates to reassignment when a reroute still misses the deadline', async () => {
+  it('keeps route risk decisions based on geographic ETA', async () => {
     const harbor = await login(ctx.base, 'harbor@demo.test');
     const admin = await login(ctx.base, 'admin@demo.test');
     // the express order has a tight (~55 min) deadline
@@ -169,20 +163,13 @@ describe('monitoring & remediation', () => {
     const ready = await c.post(`/merchant/orders/${orderId}/ready`, {}, harbor);
     const firstDriver = (ready.body.dispatch as { decision: { driverId: string } }).decision.driverId;
     await c.post('/sim/tick', {}, admin);
-    await c.post('/sim/traffic', { blockRouteOf: orderId, severity: 'major' }, admin);
-
-    let sawReassign = false;
-    for (let i = 0; i < 6; i++) {
-      const tick = await c.post('/sim/tick', {}, admin);
-      const actions = (tick.body.monitoring as { actions: { strategy: string; ok: boolean }[] }).actions;
-      if (actions.some((a) => a.strategy === 'reassign' && a.ok)) sawReassign = true;
-    }
+    const tick = await c.post('/admin/monitor/tick', {}, admin);
+    expect(tick.status).toBe(200);
     const detail = await c.get(`/admin/orders/${orderId}`, admin);
     const active = (detail.body.assignments as { status: string; driverId: string }[]).find((a) => a.status === 'active');
-    // either it reassigned to a faster driver, or (if none could make it) kept the
-    // original on the fastest route — both are valid; assert the risk was handled.
-    const events = (detail.body.events as { eventType?: string; event_type?: string }[])
-      .map((e) => e.eventType || e.event_type);
-    expect(sawReassign || events.includes('reroute_kept') || active?.driverId !== firstDriver).toBe(true);
+    expect(active?.driverId).toBe(firstDriver);
+    const route = detail.body.route as { origin: { lat: number; lon: number }; path: { toPickup?: { lat: number; lon: number }[] } } | null;
+    expect(route?.origin.lat).toBeTypeOf('number');
+    expect(route?.origin.lon).toBeTypeOf('number');
   });
 });

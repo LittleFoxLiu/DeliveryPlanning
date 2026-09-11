@@ -10,7 +10,7 @@
  * to explain the final decision (non-blocking); it never picks the driver.
  */
 import { orders, drivers, stores, type OrderRow } from '../repo.js';
-import { type DeliveryEstimate } from '../engine/routing.js';
+import { type DeliveryEstimate } from '../engine/geoRouting.js';
 import { estimateGeoDelivery } from '../engine/geoRouting.js';
 import { type ScoreBreakdown } from '../engine/scoring.js';
 import { emitAgentEvent } from '../events.js';
@@ -27,7 +27,7 @@ import {
 import { invokeTool } from './toolRegistry.js';
 import {
   tGetOrder, tValidateOrder, tOrderConstraints, tListEligibleDrivers,
-  tEstimateDelivery, tScoreCandidates, tTrafficState, type ScoredCandidate,
+  tEstimateDelivery, tScoreCandidates, type ScoredCandidate,
 } from './tools.js';
 import { classifyRisk, validateAction, decideExecution } from './policy.js';
 
@@ -76,12 +76,11 @@ function proposalFromBreakdown(b: ScoreBreakdown, driverName: string): AgentProp
 /** Recompute the authoritative full estimate for one driver (used at execution). */
 async function fullEstimate(order: OrderRow, driverId: string): Promise<DeliveryEstimate | null> {
   const [d, store] = await Promise.all([drivers.byId(driverId), stores.byId(order.store_id)]);
-  if (!d || d.geo_lat == null || d.geo_lng == null || !store || store.geo_lat == null || store.geo_lng == null
-    || order.delivery_geo_lat == null || order.delivery_geo_lng == null) return null;
+  if (!d || d.latitude == null || d.longitude == null || !store) return null;
   return estimateGeoDelivery(
-    { lat: d.geo_lat, lon: d.geo_lng },
-    { lat: store.geo_lat, lon: store.geo_lng },
-    { lat: order.delivery_geo_lat, lon: order.delivery_geo_lng },
+    { lat: d.latitude, lon: d.longitude },
+    { lat: store.latitude, lon: store.longitude },
+    { lat: order.delivery_latitude, lon: order.delivery_longitude },
   );
 }
 
@@ -229,8 +228,8 @@ export async function runDispatchLoop(input: {
 
   // ---------- 5. Monitoring / Routing: CRITIQUE ----------
   const w = winner.breakdown.factors;
-  // Traffic and deadline risk are intentionally informational while the
-  // distance-first driver routing experiment is active.
+  // OSRM already supplies the authoritative route duration used for this
+  // proposal; the remaining critique is reserved for deadline risk.
   const winnerLate = false;
   const winnerThin = false;
   if (winnerLate || winnerThin) {
@@ -242,11 +241,11 @@ export async function runDispatchLoop(input: {
       objections: [
         winnerLate
           ? `${winner.name} is projected ${-w.deadlineSlackMin} min past the deadline`
-          : `${winner.name} has only ${w.deadlineSlackMin} min of deadline slack — one traffic event breaks it`,
+          : `${winner.name} has only ${w.deadlineSlackMin} min of deadline slack — a route delay breaks it`,
       ],
       evidence: [
         { label: 'winner slack', value: `${w.deadlineSlackMin} min` },
-        { label: 'traffic penalty', value: `${w.physicalDistanceUnits} units to pickup` },
+        { label: 'distance to pickup', value: `${w.physicalDistanceKm} km` },
       ] as Evidence[],
       alternative: alt ? {
         action: 'assign_driver' as const, target: alt.driverId,

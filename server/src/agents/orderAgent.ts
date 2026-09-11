@@ -1,11 +1,10 @@
 import { orders, merchants, stores, customers } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
 import { interpretNote } from './llm.js';
-import { config } from '../config.js';
 import type { OrderStatus } from '../engine/stateMachine.js';
+import { isWithinSingapore } from '../geo.js';
 
 const NAME = 'OrderAgent';
-const SIZE = config.grid.size;
 
 /** Deterministic capabilities. The agent decides; the tools compute/fetch. */
 export const orderTools = {
@@ -18,7 +17,7 @@ export const orderTools = {
   },
   get_delivery_address: async (orderId: string) => {
     const o = await orders.byId(orderId);
-    return o ? { lat: o.delivery_lat, lng: o.delivery_lng } : undefined;
+    return o ? { lat: o.delivery_latitude, lon: o.delivery_longitude, address: o.delivery_address } : undefined;
   },
   get_order_constraints: async (orderId: string) => {
     const o = await orders.byId(orderId);
@@ -28,8 +27,8 @@ export const orderTools = {
       volume: o.volume,
       priority: o.priority,
       deadlineTs: o.deadline_ts,
-      pickup: { lat: o.pickup_lat, lng: o.pickup_lng },
-      dropoff: { lat: o.delivery_lat, lng: o.delivery_lng },
+      pickup: { lat: o.pickup_latitude, lon: o.pickup_longitude },
+      dropoff: { lat: o.delivery_latitude, lon: o.delivery_longitude, address: o.delivery_address },
     };
   },
   validate_order: async (orderId: string) => {
@@ -43,12 +42,12 @@ export const orderTools = {
     if (!store) issues.push('store_missing');
     else if (store.merchant_id !== o.merchant_id) issues.push('store_merchant_mismatch');
     if (!customer) issues.push('customer_missing');
-    for (const [k, v] of Object.entries({
-      pickup_lat: o.pickup_lat, pickup_lng: o.pickup_lng, delivery_lat: o.delivery_lat, delivery_lng: o.delivery_lng,
-    })) {
-      if (!Number.isFinite(v) || v < 0 || v > SIZE) issues.push(`coord_out_of_bounds:${k}`);
-    }
-    if (Math.abs(o.pickup_lat - o.delivery_lat) < 1 && Math.abs(o.pickup_lng - o.delivery_lng) < 1) issues.push('pickup_equals_dropoff');
+    const pickup = { lat: o.pickup_latitude, lon: o.pickup_longitude };
+    const dropoff = { lat: o.delivery_latitude, lon: o.delivery_longitude };
+    if (!isWithinSingapore(pickup)) issues.push('pickup_outside_singapore');
+    if (!isWithinSingapore(dropoff)) issues.push('dropoff_outside_singapore');
+    if (!o.delivery_address?.trim()) issues.push('delivery_address_missing');
+    if (pickup.lat === dropoff.lat && pickup.lon === dropoff.lon) issues.push('pickup_equals_dropoff');
     if (o.volume < 1) issues.push('volume_invalid');
     const deadlineMs = Date.parse(o.deadline_ts);
     if (!Number.isFinite(deadlineMs)) issues.push('deadline_invalid');

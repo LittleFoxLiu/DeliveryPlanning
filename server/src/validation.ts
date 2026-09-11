@@ -1,5 +1,5 @@
 import { badRequest } from './util.js';
-import { config } from './config.js';
+import { isWithinSingapore, type GeoPoint } from './geo.js';
 
 type Obj = Record<string, unknown>;
 
@@ -40,15 +40,21 @@ export function int(o: Obj, key: string, opts: { min?: number; max?: number; fal
   return n;
 }
 
-/** Coordinates are grid coordinates in [0, gridSize]. Never trust client values
- *  without bounds + finiteness validation. */
-export function coord(o: Obj, key: string): number {
+/** Validate a real geographic coordinate. Location values are supplied by a
+ * Nominatim selection and must remain within Singapore. */
+export function coord(o: Obj, key: string, axis: 'lat' | 'lon' = /lng|lon|longitude/i.test(key) ? 'lon' : 'lat'): number {
   const v = o[key];
   const n = typeof v === 'number' ? v : Number(v);
   if (!Number.isFinite(n)) throw badRequest(`Coordinate "${key}" must be a finite number`);
-  const max = config.grid.size;
-  if (n < 0 || n > max) throw badRequest(`Coordinate "${key}" out of bounds (0..${max})`);
-  return Math.round(n * 1000) / 1000;
+  if (axis === 'lat' && (n < -90 || n > 90)) throw badRequest(`Latitude "${key}" out of bounds`);
+  if (axis === 'lon' && (n < -180 || n > 180)) throw badRequest(`Longitude "${key}" out of bounds`);
+  return Math.round(n * 1_000_000) / 1_000_000;
+}
+
+export function singaporePoint(o: Obj, latKey: string, lonKey: string): GeoPoint {
+  const point = { lat: coord(o, latKey, 'lat'), lon: coord(o, lonKey, 'lon') };
+  if (!isWithinSingapore(point)) throw badRequest('The selected location must be within Singapore');
+  return point;
 }
 
 export function futureTs(o: Obj, key: string, opts: { maxHours?: number } = {}): string {

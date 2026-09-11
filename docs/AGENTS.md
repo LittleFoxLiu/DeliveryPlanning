@@ -14,7 +14,7 @@ it never touches numbers, auth, or DB writes.
 
 Checks that the merchant, store, and customer exist and that the store belongs to
 the merchant; that pickup/drop-off coordinates are in bounds; that pickup ≠
-drop-off (within 1 grid unit); that volume ≥ 1; and that the deadline is valid and
+drop-off (not the same geographic point); that volume ≥ 1; and that the deadline is valid and
 at least 15 minutes out. On success it advances the order `ready → validated` and
 emits the constraints (package size, priority, deadline, pickup/drop-off).
 
@@ -32,7 +32,7 @@ free-text delivery note and turn it into flags: `contactRequired`,
 | `get_merchant` | Load the merchant |
 | `get_store` | Load the pickup store |
 | `get_customer` | Load the customer for the order |
-| `get_delivery_address` | `{ lat, lng }` of the drop-off |
+| `get_delivery_address` | Nominatim-selected `{ lat, lon, address }` of the drop-off |
 | `get_order_constraints` | Package size, volume, priority, deadline, pickup, drop-off |
 | `validate_order` | Run all the checks above, return `{ ok, issues[] }` |
 | `update_order_status` | Advance the order state (guarded by expected-from) |
@@ -72,12 +72,11 @@ legs. Returns the eligible candidates plus a rejected list with reasons.
 
 ## Routing Agent — `routingAgent.ts`
 
-**Job:** All authoritative geometry. Shortest-**time** path (Dijkstra) over the
-20×20 road grid, where each segment costs `base × trafficMultiplier + delay` and a
-closed road is infinite. For every candidate driver it computes the full
-driver → pickup → customer route, the ETA, the distance, and the traffic penalty
-(ETA minus the ideal Manhattan baseline). It also recalculates a route mid-trip
-from the driver's current position, and reports when no viable route exists.
+**Job:** All authoritative route geometry. It sends Nominatim-selected Singapore
+latitude/longitude locations to OSRM and returns the full driver → pickup →
+customer driving route, ETA, and distance. It also recalculates a route mid-trip
+from the driver's current geographic position and reports when OSRM has no viable
+route.
 
 **Main methods:**
 - `computeCandidateRoutes(order, candidates, cycleId, quiet?)`
@@ -87,13 +86,11 @@ from the driver's current position, and reports when no viable route exists.
 
 | Tool | Purpose |
 | --- | --- |
-| `calculate_route` | Full path between two points on the current grid |
-| `calculate_eta` | Time along a route given traffic |
-| `calculate_distance` | Path distance |
-| `check_traffic` | Traffic multiplier on a given segment/area |
-| `get_traffic_conditions` | `{ incidents, areas, summary }` snapshot |
-| `estimate_delivery_time` | End-to-end driver → pickup → drop-off estimate |
-| `compare_routes` | Rank several routes by time |
+| `calculate_route` | OSRM driving path between two Singapore points |
+| `calculate_eta` | OSRM driving duration |
+| `calculate_distance` | OSRM driving distance |
+| `estimate_delivery_time` | End-to-end OSRM driver → pickup → drop-off estimate |
+| `compare_routes` | Rank reachable OSRM routes by duration |
 
 **Emits:** `routes_calculated`, `route_recalculated`, `reroute_failed`
 
@@ -105,7 +102,7 @@ from the driver's current position, and reports when no viable route exists.
 stick.
 
 Scoring is the deterministic weighted model — ETA 40%, route efficiency 20%,
-deadline feasibility 15%, workload 10%, vehicle fit 10%, distance 5% — with hard
+deadline feasibility 15%, workload 10%, vehicle fit 8%, distance 7% — with hard
 disqualifiers (vehicle can't carry, driver full or unavailable, guaranteed
 deadline miss, no route). Ties break deterministically by driver id.
 
@@ -143,9 +140,9 @@ Fire-and-forget, the LLM writes the human-readable "why this driver" sentence.
 recommends only** — it never changes an assignment.
 
 Each pass, for each active delivery: is the driver still available? Recompute the
-ETA from the driver's current position — has it slipped by ≥ 3 minutes, or will
-completion land past the deadline? Has the driver strayed > 2.5 units off the
-planned path? Is the route now blocked? Each problem becomes a `Finding` with a
+OSRM ETA from the driver's current geographic position — has it slipped by ≥ 3
+minutes, or will completion land past the deadline? Has the driver strayed > 1.5
+km from the planned path? Each problem becomes a `Finding` with a
 recommended trigger (`none` / `reroute` / `reassign`) and a rule-based severity
 (info / warn / critical).
 
@@ -153,7 +150,7 @@ Fire-and-forget, the LLM narrates the risk in plain language.
 
 **Main method:** `evaluateActiveDeliveries(cycleId) → Finding[]`
 
-**Constants:** `DELAY_THRESHOLD_MIN = 3`, `DEVIATION_THRESHOLD = 2.5`
+**Constants:** `DELAY_THRESHOLD_MIN = 3`, `DEVIATION_THRESHOLD_KM = 1.5`
 
 **Tools:**
 
@@ -225,7 +222,7 @@ deterministic fallback; events carry `source: "llm" | "deterministic"`.
 
 - **`Driver`** events in the feed are a human driver's own actions (`accept`,
   "I've collected the package", "Mark delivered"), handled in `server/src/services.ts`.
-- **`TrafficFeed`** (`traffic_updated`) comes from the traffic simulator.
+- There is no separate road or traffic-feed agent; route facts come from OSRM.
 
 ---
 
@@ -235,9 +232,9 @@ deterministic fallback; events carry `source: "llm" | "deterministic"`.
 2. **Order Agent** validates it
 3. **Driver Agent** finds eligible drivers → **Routing Agent** routes each →
    **Dispatch Agent** scores and assigns the best one
-4. A traffic incident closes a road on that route
-5. **Monitoring Agent** recomputes the ETA, sees the deadline risk, raises a finding
-6. **Coordinator** checks feasibility, gets an LLM recommendation, decides
+4. The driver position or route risk changes
+5. **Monitoring Agent** asks OSRM for a fresh ETA and raises a finding
+6. **Coordinator** checks feasibility, gets an LLM recommendation, and decides
 7. **Routing Agent** recalculates; if that's not enough, **Dispatch Agent**
-   reassigns to a faster driver
-8. The customer's ETA updates
+   reassigns to a faster eligible driver
+8. The customer's geographic route and ETA update

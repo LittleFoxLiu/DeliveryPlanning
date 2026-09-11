@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { scoreDriver, compareAssignments, type ScoringDriver, type ScoringOrder } from '../src/engine/scoring.js';
-import type { DeliveryEstimate } from '../src/engine/routing.js';
+import type { DeliveryEstimate } from '../src/engine/geoRouting.js';
 
 const baseOrder = (over: Partial<ScoringOrder> = {}): ScoringOrder => ({
   orderId: 'ord_x', packageSize: 'medium', volume: 2, priority: 'standard',
@@ -13,8 +13,8 @@ const baseDriver = (over: Partial<ScoringDriver> = {}): ScoringDriver => ({
 });
 
 const estimate = (toPickup: number, toDropoff: number): DeliveryEstimate => ({
-  toPickup: { path: [], distanceKm: toPickup / 4, etaMinutes: toPickup, baselineMinutes: toPickup, trafficPenaltyMinutes: 0, reachable: true, blockedSegments: [] },
-  toDropoff: { path: [], distanceKm: toDropoff / 4, etaMinutes: toDropoff, baselineMinutes: toDropoff, trafficPenaltyMinutes: 0, reachable: true, blockedSegments: [] },
+  toPickup: { path: [], distanceKm: toPickup / 4, etaMinutes: toPickup, reachable: true },
+  toDropoff: { path: [], distanceKm: toDropoff / 4, etaMinutes: toDropoff, reachable: true },
   handlingMinutes: 3, totalMinutes: toPickup + 3 + toDropoff, totalDistanceKm: (toPickup + toDropoff) / 4, reachable: true,
 });
 
@@ -24,7 +24,7 @@ describe('scoring engine', () => {
     expect(s.eligible).toBe(true);
     expect(s.score).toBeGreaterThan(0);
     expect(s.explanation.join(' ')).toMatch(/ETA to merchant/);
-    expect(Object.keys(s.contributions)).toEqual(['eta', 'efficiency', 'deadline', 'workload', 'vehicle', 'distance']);
+    expect(Object.keys(s.contributions)).toEqual(['eta', 'efficiency', 'deadline', 'workload', 'vehicle', 'distance', 'latePenalty']);
     // ETA is the dominant factor (40% of 100)
     expect(s.contributions.eta).toBeGreaterThan(s.contributions.efficiency);
   });

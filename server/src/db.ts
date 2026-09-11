@@ -136,21 +136,197 @@ export async function initDb(): Promise<void> {
     backend = await makePglite();
   }
   await backend.exec(SCHEMA_SQL);
-  // PGlite versions used by older local databases can stop processing a large
-  // multi-statement script after the first DDL batch. Run the location
-  // migrations explicitly so role dashboards never query columns that have not
-  // yet been added to an existing database.
-  for (const migration of [
-    'ALTER TABLE stores ADD COLUMN IF NOT EXISTS address text',
-    'ALTER TABLE stores ADD COLUMN IF NOT EXISTS geo_lat double precision',
-    'ALTER TABLE stores ADD COLUMN IF NOT EXISTS geo_lng double precision',
-    'ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS address text',
-    'ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS geo_lat double precision',
-    'ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS geo_lng double precision',
-    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address text',
-    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_geo_lat double precision',
-    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_geo_lng double precision',
-  ]) await backend.raw.query(migration);
+  await migrateLegacyLocationSchema();
+}
+
+async function hasColumn(table: string, column: string): Promise<boolean> {
+  if (!backend) return false;
+  const rows = await backend.raw.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = ? AND column_name = ?
+     ) AS present`, [table, column]);
+  return rows.rows[0]?.present === true;
+}
+
+async function hasConstraint(table: string, constraint: string): Promise<boolean> {
+  if (!backend) return false;
+  const rows = await backend.raw.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_constraint c
+       JOIN pg_class r ON r.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = r.relnamespace
+       WHERE n.nspname = 'public' AND r.relname = ? AND c.conname = ?
+     ) AS present`, [table, constraint]);
+  return rows.rows[0]?.present === true;
+}
+
+async function hasLegacyRoutePath(): Promise<boolean> {
+  if (!backend || !(await hasColumn('routes', 'path_json'))) return false;
+  const rows = await backend.raw.query<{ present: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM routes WHERE path_json::text LIKE ?) AS present`, ['%"x"%']);
+  return rows.rows[0]?.present === true;
+}
+
+/** Move the pre-geocoding database forward without retaining synthetic
+ * coordinates. Legacy rows without Nominatim coordinates intentionally become
+ * unusable locations and are replaced by `npm run seed`; their old values are
+ * never copied into the geographic columns. */
+async function migrateLegacyLocationSchema(): Promise<void> {
+  if (!backend) return;
+  const run = async (sql: string, params: unknown[] = []) => backend!.raw.query(sql, params);
+
+  const oldStore = await hasColumn('stores', 'pickup_lat');
+  const oldDriverLocation = await hasColumn('driver_locations', 'lat');
+  const oldOrder = await hasColumn('orders', 'delivery_lat');
+  const oldRoute = await hasColumn('routes', 'origin_lat');
+  const oldRoutePath = await hasLegacyRoutePath();
+
+  if (oldStore) {
+    await run('ALTER TABLE stores ADD COLUMN IF NOT EXISTS latitude double precision');
+    await run('ALTER TABLE stores ADD COLUMN IF NOT EXISTS longitude double precision');
+    await run('ALTER TABLE stores ADD COLUMN IF NOT EXISTS address text');
+    if (await hasColumn('stores', 'geo_lat') && await hasColumn('stores', 'geo_lng')) {
+      await run('UPDATE stores SET latitude = geo_lat, longitude = geo_lng WHERE geo_lat IS NOT NULL AND geo_lng IS NOT NULL');
+    }
+    await run('ALTER TABLE stores DROP COLUMN IF EXISTS pickup_lat');
+    await run('ALTER TABLE stores DROP COLUMN IF EXISTS pickup_lng');
+    await run('ALTER TABLE stores DROP COLUMN IF EXISTS geo_lat');
+    await run('ALTER TABLE stores DROP COLUMN IF EXISTS geo_lng');
+  }
+
+  if (oldDriverLocation) {
+    await run('ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS latitude double precision');
+    await run('ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS longitude double precision');
+    await run('ALTER TABLE driver_locations ADD COLUMN IF NOT EXISTS address text');
+    if (await hasColumn('driver_locations', 'geo_lat') && await hasColumn('driver_locations', 'geo_lng')) {
+      await run('UPDATE driver_locations SET latitude = geo_lat, longitude = geo_lng WHERE geo_lat IS NOT NULL AND geo_lng IS NOT NULL');
+    }
+    await run('ALTER TABLE driver_locations DROP COLUMN IF EXISTS lat');
+    await run('ALTER TABLE driver_locations DROP COLUMN IF EXISTS lng');
+    await run('ALTER TABLE driver_locations DROP COLUMN IF EXISTS geo_lat');
+    await run('ALTER TABLE driver_locations DROP COLUMN IF EXISTS geo_lng');
+  }
+
+  if (oldOrder) {
+    await run('ALTER TABLE orders ADD COLUMN IF NOT EXISTS pickup_latitude double precision');
+    await run('ALTER TABLE orders ADD COLUMN IF NOT EXISTS pickup_longitude double precision');
+    await run('ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_latitude double precision');
+    await run('ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_longitude double precision');
+    await run('ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address text');
+    if (await hasColumn('orders', 'delivery_geo_lat') && await hasColumn('orders', 'delivery_geo_lng')) {
+      await run('UPDATE orders SET delivery_latitude = delivery_geo_lat, delivery_longitude = delivery_geo_lng WHERE delivery_geo_lat IS NOT NULL AND delivery_geo_lng IS NOT NULL');
+    }
+    if (await hasColumn('stores', 'latitude') && await hasColumn('stores', 'longitude')) {
+      await run(`UPDATE orders o SET pickup_latitude = s.latitude, pickup_longitude = s.longitude
+                 FROM stores s WHERE s.id = o.store_id AND s.latitude IS NOT NULL AND s.longitude IS NOT NULL`);
+    }
+    await run('ALTER TABLE orders DROP COLUMN IF EXISTS pickup_lat');
+    await run('ALTER TABLE orders DROP COLUMN IF EXISTS pickup_lng');
+    await run('ALTER TABLE orders DROP COLUMN IF EXISTS delivery_lat');
+    await run('ALTER TABLE orders DROP COLUMN IF EXISTS delivery_lng');
+    await run('ALTER TABLE orders DROP COLUMN IF EXISTS delivery_geo_lat');
+    await run('ALTER TABLE orders DROP COLUMN IF EXISTS delivery_geo_lng');
+  }
+
+  if (oldRoute || oldRoutePath) {
+    // The old path_json is synthetic geometry. It cannot be converted faithfully
+    // to OSRM road geometry, so discard it while preserving delivery/order rows.
+    await run('UPDATE deliveries SET route_id = NULL WHERE route_id IS NOT NULL');
+    await run('DELETE FROM routes');
+    await run('ALTER TABLE routes ADD COLUMN IF NOT EXISTS origin_latitude double precision');
+    await run('ALTER TABLE routes ADD COLUMN IF NOT EXISTS origin_longitude double precision');
+    await run('ALTER TABLE routes DROP COLUMN IF EXISTS origin_lat');
+    await run('ALTER TABLE routes DROP COLUMN IF EXISTS origin_lng');
+  }
+
+  // Rows that never had a Nominatim result cannot be made geographic by
+  // renaming their former values. Remove those stale demo rows instead.
+  // This cleanup is deliberately repeated for partially migrated databases,
+  // not just databases where a legacy column was detected.
+  if (await hasColumn('orders', 'pickup_latitude') && await hasColumn('orders', 'delivery_latitude')
+    && await hasColumn('stores', 'latitude')) {
+    const invalidOrders = `(SELECT o.id FROM orders o
+                            LEFT JOIN stores s ON s.id = o.store_id
+                            WHERE o.pickup_latitude IS NULL OR o.pickup_longitude IS NULL
+                              OR o.pickup_latitude NOT BETWEEN 1.22 AND 1.48 OR o.pickup_longitude NOT BETWEEN 103.60 AND 104.05
+                              OR o.delivery_latitude IS NULL OR o.delivery_longitude IS NULL
+                              OR o.delivery_latitude NOT BETWEEN 1.22 AND 1.48 OR o.delivery_longitude NOT BETWEEN 103.60 AND 104.05
+                              OR o.delivery_address IS NULL
+                              OR s.id IS NULL OR s.latitude IS NULL OR s.longitude IS NULL
+                              OR s.latitude NOT BETWEEN 1.22 AND 1.48 OR s.longitude NOT BETWEEN 103.60 AND 104.05
+                              OR s.address IS NULL)`;
+    await run(`DELETE FROM agent_escalations WHERE order_id IN ${invalidOrders}`);
+    await run(`DELETE FROM agent_events WHERE order_id IN ${invalidOrders}`);
+    await run(`DELETE FROM agent_runs WHERE order_id IN ${invalidOrders}`);
+    await run(`DELETE FROM assignments WHERE order_id IN ${invalidOrders}`);
+    await run(`DELETE FROM order_items WHERE order_id IN ${invalidOrders}`);
+    await run(`DELETE FROM routes WHERE delivery_id IN (SELECT id FROM deliveries WHERE order_id IN ${invalidOrders})`);
+    await run(`DELETE FROM deliveries WHERE order_id IN ${invalidOrders}`);
+    await run(`DELETE FROM orders WHERE id IN ${invalidOrders}`);
+  }
+  if (await hasColumn('stores', 'latitude')) {
+    await run(`DELETE FROM join_requests WHERE target_store_id IN
+               (SELECT id FROM stores WHERE latitude IS NULL OR longitude IS NULL OR address IS NULL
+                OR latitude NOT BETWEEN 1.22 AND 1.48 OR longitude NOT BETWEEN 103.60 AND 104.05)`);
+    await run(`DELETE FROM stores WHERE latitude IS NULL OR longitude IS NULL OR address IS NULL
+               OR latitude NOT BETWEEN 1.22 AND 1.48 OR longitude NOT BETWEEN 103.60 AND 104.05`);
+  }
+  if (await hasColumn('driver_locations', 'latitude')) {
+    await run(`DELETE FROM driver_locations WHERE latitude IS NULL OR longitude IS NULL
+               OR latitude NOT BETWEEN 1.22 AND 1.48 OR longitude NOT BETWEEN 103.60 AND 104.05`);
+  }
+  if (await hasColumn('routes', 'origin_latitude')) {
+    await run(`DELETE FROM routes WHERE origin_latitude IS NULL OR origin_longitude IS NULL
+               OR origin_latitude NOT BETWEEN 1.22 AND 1.48 OR origin_longitude NOT BETWEEN 103.60 AND 104.05`);
+  }
+  if (await hasColumn('routes', 'traffic_penalty_minutes')) {
+    await run('ALTER TABLE routes DROP COLUMN traffic_penalty_minutes');
+  }
+  if (await hasColumn('stores', 'latitude')) {
+    await run('ALTER TABLE stores ALTER COLUMN latitude SET NOT NULL');
+    await run('ALTER TABLE stores ALTER COLUMN longitude SET NOT NULL');
+    await run('ALTER TABLE stores ALTER COLUMN address SET NOT NULL');
+  }
+  if (await hasColumn('driver_locations', 'latitude')) {
+    await run('ALTER TABLE driver_locations ALTER COLUMN latitude SET NOT NULL');
+    await run('ALTER TABLE driver_locations ALTER COLUMN longitude SET NOT NULL');
+  }
+  if (await hasColumn('orders', 'pickup_latitude')) {
+    await run('ALTER TABLE orders ALTER COLUMN pickup_latitude SET NOT NULL');
+    await run('ALTER TABLE orders ALTER COLUMN pickup_longitude SET NOT NULL');
+    await run('ALTER TABLE orders ALTER COLUMN delivery_latitude SET NOT NULL');
+    await run('ALTER TABLE orders ALTER COLUMN delivery_longitude SET NOT NULL');
+    await run('ALTER TABLE orders ALTER COLUMN delivery_address SET NOT NULL');
+  }
+  if (await hasColumn('routes', 'origin_latitude')) {
+    await run('ALTER TABLE routes ALTER COLUMN origin_latitude SET NOT NULL');
+    await run('ALTER TABLE routes ALTER COLUMN origin_longitude SET NOT NULL');
+  }
+
+  const addSingaporeCheck = async (table: string, name: string, expression: string) => {
+    if (!(await hasConstraint(table, name))) {
+      await run(`ALTER TABLE ${table} ADD CONSTRAINT ${name} CHECK (${expression})`);
+    }
+  };
+  if (await hasColumn('stores', 'latitude')) {
+    await addSingaporeCheck('stores', 'stores_singapore_bounds', 'latitude BETWEEN 1.22 AND 1.48 AND longitude BETWEEN 103.60 AND 104.05');
+  }
+  if (await hasColumn('driver_locations', 'latitude')) {
+    await addSingaporeCheck('driver_locations', 'driver_locations_singapore_bounds', 'latitude BETWEEN 1.22 AND 1.48 AND longitude BETWEEN 103.60 AND 104.05');
+  }
+  if (await hasColumn('orders', 'pickup_latitude')) {
+    await addSingaporeCheck('orders', 'orders_pickup_singapore_bounds', 'pickup_latitude BETWEEN 1.22 AND 1.48 AND pickup_longitude BETWEEN 103.60 AND 104.05');
+    await addSingaporeCheck('orders', 'orders_delivery_singapore_bounds', 'delivery_latitude BETWEEN 1.22 AND 1.48 AND delivery_longitude BETWEEN 103.60 AND 104.05');
+  }
+  if (await hasColumn('routes', 'origin_latitude')) {
+    await addSingaporeCheck('routes', 'routes_singapore_bounds', 'origin_latitude BETWEEN 1.22 AND 1.48 AND origin_longitude BETWEEN 103.60 AND 104.05');
+  }
+
+  // The road graph and area traffic rows only described the removed synthetic
+  // network. OSRM now owns route geometry and travel duration.
+  await run('DROP TABLE IF EXISTS traffic_conditions');
+  await run('DROP TABLE IF EXISTS road_segments');
 }
 
 export function dbKind(): 'pglite' | 'postgres' {

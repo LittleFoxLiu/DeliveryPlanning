@@ -24,8 +24,8 @@ export async function orderView(o: OrderRow) {
     volume: o.volume,
     deadlineTs: o.deadline_ts,
     note: o.note,
-    pickup: { x: o.pickup_lat, y: o.pickup_lng, lat: store?.geo_lat, lon: store?.geo_lng, address: store?.address },
-    dropoff: { x: o.delivery_lat, y: o.delivery_lng, lat: o.delivery_geo_lat, lon: o.delivery_geo_lng, address: o.delivery_address },
+    pickup: { lat: o.pickup_latitude, lon: o.pickup_longitude, address: store?.address ?? null },
+    dropoff: { lat: o.delivery_latitude, lon: o.delivery_longitude, address: o.delivery_address },
     createdAt: o.created_at,
     readyAt: o.ready_at,
     items,
@@ -54,10 +54,9 @@ export async function activeRouteView(deliveryId: string) {
   if (!route) return null;
   return {
     id: route.id,
-    origin: { x: route.origin_lat, y: route.origin_lng },
+    origin: { lat: route.origin_latitude, lon: route.origin_longitude },
     distanceKm: route.distance_km,
     etaMinutes: route.eta_minutes,
-    trafficPenaltyMinutes: route.traffic_penalty_minutes,
     legs: route.legs_json,
     path: route.path_json,
     createdAt: route.created_at,
@@ -74,8 +73,7 @@ export function driverAdminView(d: DriverFull) {
     maxPackageSize: d.max_package_size,
     status: d.status,
     currentOrderCount: d.current_order_count,
-    location: d.lat != null ? { x: d.lat, y: d.lng } : null,
-    geoLocation: d.geo_lat != null ? { lat: d.geo_lat, lon: d.geo_lng, address: d.location_address } : null,
+    location: d.latitude != null ? { lat: d.latitude, lon: d.longitude!, address: d.location_address } : null,
     locationAt: d.location_at,
   };
 }
@@ -123,8 +121,8 @@ export async function orderTrackingView(o: OrderRow) {
   return {
     order: {
       id: o.id, status: o.status, priority: o.priority, deadlineTs: o.deadline_ts,
-      pickup: { x: o.pickup_lat, y: o.pickup_lng, address: store?.address ?? null, lat: store?.geo_lat ?? null, lon: store?.geo_lng ?? null },
-      dropoff: { x: o.delivery_lat, y: o.delivery_lng, address: o.delivery_address, lat: o.delivery_geo_lat, lon: o.delivery_geo_lng }, items,
+      pickup: { lat: o.pickup_latitude, lon: o.pickup_longitude, address: store?.address ?? null },
+      dropoff: { lat: o.delivery_latitude, lon: o.delivery_longitude, address: o.delivery_address }, items,
     },
     delivery: delivery
       ? {
@@ -134,10 +132,8 @@ export async function orderTrackingView(o: OrderRow) {
         pickupAt: delivery.pickup_at,
         deliveredAt: delivery.delivered_at,
         driver: driverPublicView(driver),
-        driverPosition: driver && driver.lat != null && ['en_route_pickup', 'picked_up', 'en_route_drop'].includes(delivery.status)
-          ? { x: driver.lat, y: driver.lng } : null,
-        driverPositionGeo: driver && driver.geo_lat != null && ['en_route_pickup', 'picked_up', 'en_route_drop'].includes(delivery.status)
-          ? { lat: driver.geo_lat, lon: driver.geo_lng } : null,
+        driverPosition: driver && driver.latitude != null && ['en_route_pickup', 'picked_up', 'en_route_drop'].includes(delivery.status)
+          ? { lat: driver.latitude, lon: driver.longitude! } : null,
         route,
       }
       : null,

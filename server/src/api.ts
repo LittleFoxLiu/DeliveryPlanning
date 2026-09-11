@@ -4,14 +4,14 @@ import { config } from './config.js';
 import { authenticate, requireRole, hashPassword, verifyPassword, issueToken, type AuthUser } from './auth.js';
 import { rateLimit, h } from './http.js';
 import { badRequest, forbidden, notFound, conflict, HttpError } from './util.js';
-import { asObject, str, enumVal, int, coord, futureTs, idParam } from './validation.js';
+import { asObject, str, enumVal, int, futureTs, idParam, singaporePoint } from './validation.js';
 import {
-  users, merchants, stores, customers, drivers, orders, deliveries, roads, traffic, memberships, products,
+  users, merchants, stores, customers, drivers, orders, deliveries, memberships, products,
   type OrderItemInput, type ProductRow, type UserRow,
 } from './repo.js';
 import { listEvents, bus } from './events.js';
 import { coordinator } from './agents/coordinator.js';
-import { driverProgress, simulateTick, injectTraffic } from './services.js';
+import { driverProgress, simulateTick } from './services.js';
 import {
   orderView, deliveryView, activeRouteView, driverAdminView, assignmentReasoningView, orderTrackingView,
   runTraceView, runSummaryView, publicRunView,
@@ -20,7 +20,7 @@ import {
   listRuns, getRun, latestRunForOrder, listEscalations, getEscalation, resolveEscalation,
 } from './agents/runStore.js';
 import { listTools } from './agents/toolRegistry.js';
-import { whatIfDriverOffline, whatIfRoadClosure } from './agents/whatif.js';
+import { whatIfDriverOffline } from './agents/whatif.js';
 import { runEvaluation, getLastEvalReport, evalRunning } from './evaluation/index.js';
 
 export const api = Router();
@@ -30,11 +30,8 @@ api.get('/health', (_req, res) => res.json({
   ok: true, ts: new Date().toISOString(),
   llm: config.llm.enabled ? { enabled: true, provider: config.llm.provider, model: config.llm.model } : { enabled: false },
 }));
-api.get('/meta/grid', authenticate(true), h(async (_req, res) => {
-  res.json({
-    size: config.grid.size,
-    roads: (await roads.all()).map((r) => ({ id: r.id, ax: r.ax, ay: r.ay, bx: r.bx, by: r.by, status: r.status, delay: r.delay_minutes })),
-  });
+api.get('/meta/geo', authenticate(true), (_req, res) => res.json({
+  geocoder: 'Nominatim', router: 'OSRM', country: 'Singapore', bounds: config.singapore,
 }));
 
 /* -------------------------------------------------------------------- auth */
@@ -54,25 +51,22 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
 
   if (role === 'merchant') {
     const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
-    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress', 'storeGeoLat', 'storeGeoLng');
-    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: location.lat, pickupLng: location.lng, address: location.address, geoLat: location.geoLat, geoLng: location.geoLng });
+    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress');
+    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), latitude: location.lat, longitude: location.lon, address: location.address });
     refId = merchant.id;
   } else if (role === 'customer') {
     refId = (await customers.create(name)).id;
   } else {
-    const geoLat = optionalNumber(b.geoLat);
-    const geoLng = optionalNumber(b.geoLng);
-    if (geoLat === null || geoLng === null) throw badRequest('A Nominatim starting address is required');
+    const location = locationPoint(b, 'lat', 'lng', 'address');
     const created = await drivers.create({
       name,
       vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
       capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }),
       maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
-      lat: coord(b, 'lat'),
-      lng: coord(b, 'lng'),
+      latitude: location.lat,
+      longitude: location.lon,
       status: 'available',
-      address: str(b, 'address', { optional: true, max: 300 }) || null,
-      geoLat, geoLng,
+      address: location.address,
     });
     refId = created.id;
   }
@@ -151,19 +145,16 @@ api.post('/onboarding/role', authenticate(true), authLimiter, h(async (req, res)
   let refId = current.ref_id;
   if (role === 'merchant') {
     const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
-    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress', 'storeGeoLat', 'storeGeoLng');
-    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), pickupLat: location.lat, pickupLng: location.lng, address: location.address, geoLat: location.geoLat, geoLng: location.geoLng });
+    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress');
+    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), latitude: location.lat, longitude: location.lon, address: location.address });
     refId = merchant.id;
   } else if (role === 'driver') {
-    const geoLat = optionalNumber(b.geoLat);
-    const geoLng = optionalNumber(b.geoLng);
-    if (geoLat === null || geoLng === null) throw badRequest('A Nominatim starting address is required');
+    const location = locationPoint(b, 'lat', 'lng', 'address');
     const driver = await drivers.create({
       name: current.name, vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
       capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }), maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
-      lat: coord(b, 'lat'), lng: coord(b, 'lng'), status: 'available',
-      address: str(b, 'address', { optional: true, max: 300 }) || null,
-      geoLat, geoLng,
+      latitude: location.lat, longitude: location.lon, status: 'available',
+      address: location.address,
     });
     refId = driver.id;
   } else if (role === 'customer') {
@@ -185,7 +176,7 @@ api.get('/directory/merchants', authenticate(true), h(async (_req, res) => {
     merchants: await Promise.all(list.map(async (m) => ({
       id: m.id,
       name: m.name,
-      stores: (await stores.byMerchant(m.id)).map((s) => ({ id: s.id, name: s.name, address: s.address, pickup: { x: s.pickup_lat, y: s.pickup_lng, lat: s.geo_lat, lon: s.geo_lng } })),
+      stores: (await stores.byMerchant(m.id)).map((s) => ({ id: s.id, name: s.name, address: s.address, pickup: { lat: s.latitude, lon: s.longitude } })),
     }))),
   });
 }));
@@ -219,7 +210,7 @@ async function orderWithDelivery(o: Parameters<typeof orderView>[0]) {
 const merchantOnly = [authenticate(true), requireRole('merchant')];
 
 api.get('/merchant/stores', ...merchantOnly, h(async (req, res) => {
-  res.json({ stores: (await stores.byMerchant(req.user!.refId!)).map((s) => ({ id: s.id, name: s.name, address: s.address, pickup: { x: s.pickup_lat, y: s.pickup_lng, lat: s.geo_lat, lon: s.geo_lng } })) });
+  res.json({ stores: (await stores.byMerchant(req.user!.refId!)).map((s) => ({ id: s.id, name: s.name, address: s.address, pickup: { lat: s.latitude, lon: s.longitude } })) });
 }));
 
 api.get('/merchant/orders', ...merchantOnly, h(async (req, res) => {
@@ -242,13 +233,11 @@ api.post('/merchant/orders', ...merchantOnly, h(async (req, res) => {
     merchant_id: req.user!.refId!,
     store_id: storeId,
     customer_id: customer.id,
-    pickup_lat: store.pickup_lat,
-    pickup_lng: store.pickup_lng,
-    delivery_lat: dest.lat,
-    delivery_lng: dest.lng,
+    pickup_latitude: store.latitude,
+    pickup_longitude: store.longitude,
+    delivery_latitude: dest.lat,
+    delivery_longitude: dest.lon,
     delivery_address: dest.address,
-    delivery_geo_lat: dest.geoLat,
-    delivery_geo_lng: dest.geoLng,
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
     package_size: resolved.packageSize,
@@ -348,7 +337,7 @@ api.get('/merchant/orders/:id', ...merchantOnly, h(async (req, res) => {
     order: await orderView(order),
     delivery: delivery ? deliveryView(delivery) : null,
     assignedDriver: driver
-      ? { name: driver.name, vehicleType: driver.vehicle_type, status: driver.status, location: driver.lat != null ? { x: driver.lat, y: driver.lng } : null, geoLocation: driver.geo_lat != null ? { lat: driver.geo_lat, lon: driver.geo_lng, address: driver.location_address } : null }
+      ? { name: driver.name, vehicleType: driver.vehicle_type, status: driver.status, location: driver.latitude != null ? { lat: driver.latitude, lon: driver.longitude, address: driver.location_address } : null }
       : null,
     route: delivery ? await activeRouteView(delivery.id) : null,
     events: await listEvents({ orderId: order.id, limit: 60 }),
@@ -373,13 +362,11 @@ api.post('/customer/orders', ...customerOnly, h(async (req, res) => {
     merchant_id: store.merchant_id,
     store_id: storeId,
     customer_id: req.user!.refId!,
-    pickup_lat: store.pickup_lat,
-    pickup_lng: store.pickup_lng,
-    delivery_lat: dest.lat,
-    delivery_lng: dest.lng,
+    pickup_latitude: store.latitude,
+    pickup_longitude: store.longitude,
+    delivery_latitude: dest.lat,
+    delivery_longitude: dest.lon,
     delivery_address: dest.address,
-    delivery_geo_lat: dest.geoLat,
-    delivery_geo_lng: dest.geoLng,
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
     package_size: resolved.packageSize,
@@ -405,9 +392,9 @@ const driverOnly = [authenticate(true), requireRole('driver')];
 
 async function driverSelf(refId: string) {
   const me = await drivers.byId(refId);
-  return me && me.lat != null
-    ? { location: { x: me.lat, y: me.lng }, geoLocation: me.geo_lat != null ? { lat: me.geo_lat, lon: me.geo_lng } : null, address: me.location_address, status: me.status, name: me.name, vehicleType: me.vehicle_type }
-    : { location: null, geoLocation: null, address: null, status: me?.status ?? 'offline', name: me?.name ?? '', vehicleType: me?.vehicle_type ?? '' };
+  return me && me.latitude != null
+    ? { location: { lat: me.latitude, lon: me.longitude, address: me.location_address }, address: me.location_address, status: me.status, name: me.name, vehicleType: me.vehicle_type }
+    : { location: null, address: null, status: me?.status ?? 'offline', name: me?.name ?? '', vehicleType: me?.vehicle_type ?? '' };
 }
 
 api.get('/driver/deliveries', ...driverOnly, h(async (req, res) => {
@@ -424,8 +411,8 @@ api.get('/driver/deliveries', ...driverOnly, h(async (req, res) => {
           priority: o.priority, packageSize: o.package_size, deadlineTs: o.deadline_ts, note: o.note, items,
           customerName: cust?.name ?? 'Customer',
         },
-        pickup: { x: o.pickup_lat, y: o.pickup_lng, name: store?.name ?? 'Merchant', address: store?.address, lat: store?.geo_lat, lon: store?.geo_lng },
-        dropoff: { x: o.delivery_lat, y: o.delivery_lng, address: o.delivery_address, lat: o.delivery_geo_lat, lon: o.delivery_geo_lng },
+        pickup: { lat: o.pickup_latitude, lon: o.pickup_longitude, name: store?.name ?? 'Merchant', address: store?.address },
+        dropoff: { lat: o.delivery_latitude, lon: o.delivery_longitude, address: o.delivery_address },
         route: await activeRouteView(d.id),
       };
     })),
@@ -444,8 +431,8 @@ api.get('/driver/deliveries/:id', ...driverOnly, h(async (req, res) => {
       priority: o.priority, packageSize: o.package_size, volume: o.volume, deadlineTs: o.deadline_ts, note: o.note, items,
       customerName: cust?.name ?? 'Customer',
     },
-    pickup: { x: o.pickup_lat, y: o.pickup_lng, name: store?.name ?? 'Merchant', address: store?.address, lat: store?.geo_lat, lon: store?.geo_lng },
-    dropoff: { x: o.delivery_lat, y: o.delivery_lng, address: o.delivery_address, lat: o.delivery_geo_lat, lon: o.delivery_geo_lng },
+    pickup: { lat: o.pickup_latitude, lon: o.pickup_longitude, name: store?.name ?? 'Merchant', address: store?.address },
+    dropoff: { lat: o.delivery_latitude, lon: o.delivery_longitude, address: o.delivery_address },
     route: await activeRouteView(delivery.id),
   });
 }));
@@ -476,13 +463,8 @@ api.post('/driver/location', ...driverOnly, h(async (req, res) => {
   const driver = await drivers.byId(req.user!.refId!);
   if (!driver) throw notFound('Driver profile not found');
   if (driver.status === 'available') throw conflict('Set your status to break or offline before changing your position');
-  const geoLat = optionalNumber(b.geoLat);
-  const geoLng = optionalNumber(b.geoLng);
-  if (geoLat === null || geoLng === null) throw badRequest('A Nominatim latitude and longitude are required');
-  if (geoLat < -90 || geoLat > 90 || geoLng < -180 || geoLng > 180) throw badRequest('Invalid geographic coordinates');
-  const lat = b.lat === undefined ? gridFromGeo(geoLat, 1.22, 1.39) : coord(b, 'lat');
-  const lng = b.lng === undefined ? gridFromGeo(geoLng, 103.74, 104.02) : coord(b, 'lng');
-  await drivers.recordLocation(req.user!.refId!, lat, lng, str(b, 'address', { optional: true, max: 300 }) || null, geoLat, geoLng);
+  const location = locationPoint(b, 'lat', 'lng', 'address');
+  await drivers.recordLocation(req.user!.refId!, location.lat, location.lon, location.address);
   res.json({ ok: true });
 }));
 
@@ -520,19 +502,19 @@ async function provisionUser(email: string, role: 'merchant' | 'driver' | 'custo
 api.post('/admin/merchants', ...adminOnly, h(async (req, res) => {
   const b = asObject(req.body);
   const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
+  const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress');
   const store = await stores.create({
     merchantId: merchant.id,
     name: str(b, 'storeName', { min: 1, max: 120 }),
-    pickupLat: coord(b, 'storeLat'),
-    pickupLng: coord(b, 'storeLng'),
-    address: str(b, 'storeAddress', { optional: true, max: 300 }) || null,
-    geoLat: optionalNumber(b.storeGeoLat), geoLng: optionalNumber(b.storeGeoLng),
+    latitude: location.lat,
+    longitude: location.lon,
+    address: location.address,
   });
   const contact = str(b, 'contactName', { min: 1, max: 120 });
   const credentials = await provisionUser(str(b, 'email', { max: 200 }), 'merchant', contact, merchant.id);
   res.status(201).json({
     merchant: { id: merchant.id, name: merchant.name },
-    store: { id: store.id, name: store.name, pickup: { x: store.pickupLat, y: store.pickupLng } },
+    store: { id: store.id, name: store.name, pickup: { lat: store.latitude, lon: store.longitude } },
     credentials,
   });
 }));
@@ -540,17 +522,15 @@ api.post('/admin/merchants', ...adminOnly, h(async (req, res) => {
 api.post('/admin/drivers', ...adminOnly, h(async (req, res) => {
   const b = asObject(req.body);
   const name = str(b, 'name', { min: 1, max: 120 });
-  const geoLat = optionalNumber(b.geoLat);
-  const geoLng = optionalNumber(b.geoLng);
-  if (geoLat === null || geoLng === null) throw badRequest('A Nominatim starting address is required');
+  const location = locationPoint(b, 'lat', 'lng', 'address');
   const created = await drivers.create({
     name,
     vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
     capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }),
     maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
-    lat: coord(b, 'lat'),
-    lng: coord(b, 'lng'),
-    status: 'available', address: str(b, 'address', { max: 300 }), geoLat, geoLng,
+    latitude: location.lat,
+    longitude: location.lon,
+    status: 'available', address: location.address,
   });
   const credentials = await provisionUser(str(b, 'email', { max: 200 }), 'driver', name, created.id);
   res.status(201).json({ driver: { id: created.id, name }, credentials });
@@ -565,8 +545,8 @@ api.post('/admin/customers', ...adminOnly, h(async (req, res) => {
 }));
 
 api.get('/admin/overview', ...adminOnly, h(async (_req, res) => {
-  const [activeOrders, allDrivers, activeDeliveries, trafficRows, roadRows, events] = await Promise.all([
-    orders.active(), drivers.all(), deliveries.active(), traffic.all(), roads.all(), listEvents({ limit: 60 }),
+  const [activeOrders, allDrivers, activeDeliveries, events] = await Promise.all([
+    orders.active(), drivers.all(), deliveries.active(), listEvents({ limit: 60 }),
   ]);
   const assignmentsFlat = (await Promise.all(activeOrders.map((o) => assignmentReasoningView(o.id)))).flat().filter((a) => a.status === 'active');
   res.json({
@@ -574,21 +554,10 @@ api.get('/admin/overview', ...adminOnly, h(async (_req, res) => {
     drivers: allDrivers.map(driverAdminView),
     deliveries: await Promise.all(activeDeliveries.map(async (d) => ({ ...deliveryView(d), route: await activeRouteView(d.id) }))),
     assignments: assignmentsFlat,
-    traffic: trafficRows,
-    roadIncidents: roadRows.filter((r) => r.status !== 'clear').map((r) => ({ id: r.id, status: r.status, delay: r.delay_minutes })),
+    routing: { provider: 'OSRM', geocoder: 'Nominatim' },
     events,
     llmEnabled: config.llm.enabled,
   });
-}));
-
-api.post('/admin/roads/randomize', ...adminOnly, h(async (_req, res) => {
-  const statuses = ['clear', 'moderate', 'heavy', 'closed'] as const;
-  const segments = await roads.all();
-  for (const segment of segments) {
-    const status = statuses[Math.floor(Math.random() * statuses.length)];
-    await roads.setStatus(segment.id, status, status === 'clear' ? 0 : status === 'moderate' ? 4 : status === 'heavy' ? 10 : 0);
-  }
-  res.json({ updated: segments.length });
 }));
 
 api.get('/admin/orders', ...adminOnly, h(async (_req, res) => {
@@ -655,12 +624,8 @@ api.get('/admin/eval/results', ...adminOnly, h(async (_req, res) => {
 
 api.post('/admin/whatif', ...adminOnly, h(async (req, res) => {
   const b = asObject(req.body);
-  const kind = enumVal(b, 'kind', ['driver_offline', 'road_close'] as const);
-  if (kind === 'driver_offline') {
-    res.json({ result: await whatIfDriverOffline(idParam(b.driverId, 'driver id')) });
-  } else {
-    res.json({ result: await whatIfRoadClosure(idParam(b.orderId, 'order id')) });
-  }
+  const kind = enumVal(b, 'kind', ['driver_offline'] as const);
+  res.json({ result: await whatIfDriverOffline(idParam(b.driverId, 'driver id')) });
 }));
 
 api.get('/admin/tools', ...adminOnly, h(async (_req, res) => res.json({ tools: listTools() })));
@@ -702,18 +667,6 @@ const simOnly = [authenticate(true), requireRole('admin')];
 
 api.post('/sim/tick', ...simOnly, h(async (_req, res) => res.json(await simulateTick())));
 
-api.post('/sim/traffic', ...simOnly, h(async (req, res) => {
-  const b = asObject(req.body);
-  const result = await injectTraffic({
-    segments: Array.isArray(b.segments) ? b.segments.map((s) => idParam(s, 'segment id').toUpperCase()) : undefined,
-    status: b.status ? enumVal(b, 'status', ['clear', 'moderate', 'heavy', 'closed'] as const) : undefined,
-    delayMinutes: b.delayMinutes !== undefined ? int(b, 'delayMinutes', { min: 0, max: 120 }) : undefined,
-    blockRouteOf: b.blockRouteOf ? idParam(b.blockRouteOf, 'order id') : undefined,
-    severity: b.severity ? enumVal(b, 'severity', ['minor', 'major'] as const) : undefined,
-  });
-  res.json(result);
-}));
-
 api.post('/sim/driver/:id/offline', ...simOnly, h(async (req, res) => {
   const did = idParam(req.params.id, 'driver id');
   if (!(await drivers.byId(did))) throw notFound('Driver not found');
@@ -728,38 +681,18 @@ api.post('/sim/reset', ...simOnly, h(async (_req, res) => {
 }));
 
 /* --------------------------------------------------------------- helpers */
-/** Validate a delivery destination against the store's pickup point so the
- *  order can't be dispatched as a zero-distance no-op. */
-function optionalNumber(value: unknown): number | null {
-  if (value === undefined || value === null || value === '') return null;
-  const n = Number(value);
-  if (!Number.isFinite(n)) throw badRequest('Geocoded coordinates must be finite numbers');
-  return n;
+/** Require a real address selected by Nominatim and keep its coordinates
+ * unchanged for OSRM and Leaflet. */
+type LocationPoint = { lat: number; lon: number; address: string };
+function locationPoint(b: Record<string, unknown>, latKey: string, lonKey: string, addressKey: string): LocationPoint {
+  const point = singaporePoint(b, latKey, lonKey);
+  return { ...point, address: str(b, addressKey, { min: 1, max: 300 }) };
 }
 
-type LocationPoint = { lat: number; lng: number; address: string | null; geoLat: number | null; geoLng: number | null };
-function locationPoint(b: Record<string, unknown>, latKey: string, lngKey: string, addressKey: string, geoLatKey: string, geoLngKey: string): LocationPoint {
-  const geoLat = optionalNumber(b[geoLatKey]);
-  const geoLng = optionalNumber(b[geoLngKey]);
-  if (geoLat === null || geoLng === null) throw badRequest(`A real address with Nominatim coordinates is required for ${addressKey}`);
-  if ((geoLat === null) !== (geoLng === null) || (geoLat !== null && (geoLat < -90 || geoLat > 90 || geoLng! < -180 || geoLng! > 180))) {
-    throw badRequest('Both valid geocoded latitude and longitude are required');
-  }
-  const address = str(b, addressKey, { max: 300 });
-  const lat = b[latKey] === undefined && geoLat !== null ? gridFromGeo(geoLat, 1.22, 1.39) : coord(b, latKey);
-  const lng = b[lngKey] === undefined && geoLng !== null ? gridFromGeo(geoLng, 103.74, 104.02) : coord(b, lngKey);
-  return { lat, lng, address, geoLat, geoLng };
-}
-
-function gridFromGeo(value: number, min: number, max: number): number {
-  return Math.max(0, Math.min(config.grid.size, Math.round(((value - min) / (max - min)) * config.grid.size)));
-}
-
-function deliveryPoint(b: Record<string, unknown>, store: { pickup_lat: number; pickup_lng: number }): LocationPoint {
-  const point = locationPoint(b, 'deliveryLat', 'deliveryLng', 'deliveryAddress', 'deliveryGeoLat', 'deliveryGeoLng');
-  const { lat, lng } = point;
-  if (Math.abs(lat - store.pickup_lat) < 1 && Math.abs(lng - store.pickup_lng) < 1) {
-    throw badRequest(`The delivery address (${lat}, ${lng}) is at the pickup location — choose a destination away from the store.`);
+function deliveryPoint(b: Record<string, unknown>, store: { latitude: number; longitude: number }): LocationPoint {
+  const point = locationPoint(b, 'deliveryLat', 'deliveryLng', 'deliveryAddress');
+  if (Math.abs(point.lat - store.latitude) < 0.0001 && Math.abs(point.lon - store.longitude) < 0.0001) {
+    throw badRequest('The delivery address is at the pickup location — choose a destination away from the store.');
   }
   return point;
 }
