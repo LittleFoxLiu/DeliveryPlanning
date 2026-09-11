@@ -3,7 +3,7 @@ import { get, post, patch, del, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../main';
 import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
 import { productGrid, cartSummary, cartCount, cartItems, wireCart, type Cart } from './shop';
-import { mountRouteMap, searchNominatim, type GeoPoint } from '../geoMap';
+import { mountRouteMap, searchNominatim, colorForRoad, type GeoPoint, type RoadInfo } from '../geoMap';
 import { routeFromHere } from '../geo';
 
 interface MerchantOrders { orders: OrderDto[] }
@@ -26,22 +26,34 @@ let currentPage = 'orders';
 export async function renderMerchant(el: HTMLElement, _user: unknown, page = 'orders'): Promise<void> {
   resetSig('merchant');
   currentPage = page;
-  try { stores = (await get<{ stores: typeof stores }>('/merchant/stores')).stores; } catch { /* ignore */ }
+  if (!stores.length) { try { stores = (await get<{ stores: typeof stores }>('/merchant/stores')).stores; } catch { /* ignore */ } }
+  if (!productList.length) { try { productList = (await get<{ products: ProductDto[] }>('/merchant/products')).products; } catch { /* ignore */ } }
+  await refresh(el);
+  poll(() => refresh(el), 4000);
+}
+
+/** Refetch orders (+ the selected order's detail) and repaint. Kept separate
+ *  from `renderMerchant` so selecting a different order never refetches
+ *  stores/products or restarts the poll interval — that used to race the
+ *  background poll and could leave a click looking like it did nothing. */
+async function refresh(el: HTMLElement): Promise<void> {
+  try {
+    const { orders } = await get<MerchantOrders>('/merchant/orders');
+    if (!selected && orders.length) selected = orders[0].id;
+    let detail: OrderDetail | null = null;
+    if (selected && currentPage === 'orders') { try { detail = await get<OrderDetail>(`/merchant/orders/${selected}`); } catch { detail = null; } }
+    if (!changed('merchant', { orders, detail, selected, currentPage, productList, cart })) return;
+    if (patchView(el, view(orders, detail))) wire(el, detail); else resetSig('merchant');
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) handleUnauthed();
+    else console.error('[merchant] refresh failed', err);
+  }
+}
+
+async function refreshProducts(el: HTMLElement): Promise<void> {
   try { productList = (await get<{ products: ProductDto[] }>('/merchant/products')).products; } catch { /* ignore */ }
-  const draw = async () => {
-    try {
-      const { orders } = await get<MerchantOrders>('/merchant/orders');
-      if (!selected && orders.length) selected = orders[0].id;
-      let detail: OrderDetail | null = null;
-      if (selected && page === 'orders') { try { detail = await get<OrderDetail>(`/merchant/orders/${selected}`); } catch { detail = null; } }
-      if (!changed('merchant', { orders, detail, selected, page, productList, cart })) return;
-      if (patchView(el, view(orders, detail))) wire(el, detail); else resetSig('merchant');
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) handleUnauthed();
-    }
-  };
-  await draw();
-  poll(draw, 4000);
+  resetSig('merchant');
+  await refresh(el);
 }
 
 const activeProducts = () => productList.filter((p) => p.active);
@@ -165,14 +177,20 @@ function newOrderCard(): string {
 function wire(el: HTMLElement, detail: OrderDetail | null = null): void {
   const routeMap = el.querySelector<HTMLElement>('#merchant-route-map');
   if (routeMap && detail) {
-    const points: Array<GeoPoint & { kind: string; name: string; detail?: string }> = [];
+    const points: Array<GeoPoint & { kind: string; name: string; detail?: string; address?: string | null }> = [];
     if (detail.assignedDriver?.location) points.push({ ...detail.assignedDriver.location, kind: 'Driver', name: detail.assignedDriver.name, detail: detail.assignedDriver.status });
-    if (detail.order.pickup.lat != null && detail.order.pickup.lon != null) points.push({ lat: detail.order.pickup.lat, lon: detail.order.pickup.lon, kind: 'Pickup', name: detail.order.storeName || 'Merchant pickup', address: detail.order.pickup.address, detail: detail.order.pickup.address || undefined });
-    if (detail.order.dropoff.lat != null && detail.order.dropoff.lon != null) points.push({ lat: detail.order.dropoff.lat, lon: detail.order.dropoff.lon, kind: 'Drop-off', name: detail.order.customerName, address: detail.order.dropoff.address, detail: detail.order.dropoff.address || undefined });
-    const path = [...(detail.route?.path.toPickup ?? []), ...(detail.route?.path.toDropoff ?? [])].map((p) => [p.lat, p.lon] as [number, number]);
-    mountRouteMap(routeMap, points, path.length > 1 ? [path] : []);
+    if (detail.order.pickup.lat != null && detail.order.pickup.lon != null) points.push({ lat: detail.order.pickup.lat, lon: detail.order.pickup.lon, kind: 'Pickup', name: detail.order.storeName || 'Merchant pickup', address: detail.order.pickup.address });
+    if (detail.order.dropoff.lat != null && detail.order.dropoff.lon != null) points.push({ lat: detail.order.dropoff.lat, lon: detail.order.dropoff.lon, kind: 'Drop-off', name: detail.order.customerName, address: detail.order.dropoff.address });
+    const path = [...(detail.route?.path.toPickup ?? []), ...(detail.route?.path.toDropoff ?? [])];
+    const coords = routeFromHere(path, detail.assignedDriver?.location ?? null);
+    const roads: RoadInfo[] = coords.length > 1 ? [{
+      coords,
+      color: colorForRoad(detail.order.id), label: `Order ${detail.order.code}`,
+      detail: `${detail.assignedDriver ? `${detail.assignedDriver.name} · ` : ''}${detail.order.status.replace(/_/g, ' ')}`,
+    }] : [];
+    mountRouteMap(routeMap, points, roads);
   }
-  const repaint = () => renderMerchant(el, null, currentPage);
+  const repaint = () => { resetSig('merchant'); refresh(el); };
   const address = el.querySelector<HTMLInputElement>('[data-merchant-address]');
   address?.addEventListener('input', () => {
     orderDeliveryGeo = null;
@@ -234,15 +252,15 @@ function wire(el: HTMLElement, detail: OrderDetail | null = null): void {
         description: fd.get('description') || undefined,
       });
       toast('Product added');
-      repaint();
+      refreshProducts(el);
     } catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); }
   });
   el.querySelectorAll<HTMLButtonElement>('[data-prod-toggle]').forEach((b) => b.addEventListener('click', async () => {
-    try { await patch(`/merchant/products/${b.dataset.prodToggle}`, { active: b.dataset.active === '1' }); repaint(); }
+    try { await patch(`/merchant/products/${b.dataset.prodToggle}`, { active: b.dataset.active === '1' }); refreshProducts(el); }
     catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); }
   }));
   el.querySelectorAll<HTMLButtonElement>('[data-prod-del]').forEach((b) => b.addEventListener('click', async () => {
-    try { await del(`/merchant/products/${b.dataset.prodDel}`); toast('Product removed'); delete cart[b.dataset.prodDel!]; repaint(); }
+    try { await del(`/merchant/products/${b.dataset.prodDel}`); toast('Product removed'); delete cart[b.dataset.prodDel!]; refreshProducts(el); }
     catch (err) { toast(err instanceof ApiError ? err.message : 'Failed', 'error'); }
   }));
 

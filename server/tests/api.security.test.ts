@@ -70,7 +70,8 @@ describe('IDOR / ownership', () => {
     const james = await login(ctx.base, 'james@demo.test');
     const mine = await c.post('/customer/orders', {
       storeId: (await c.get('/directory/merchants', maya)).body.merchants[0].stores[0].id,
-      deliveryLat: 5, deliveryLng: 5, packageSize: 'small', priority: 'standard',
+      deliveryLat: 1.3508, deliveryLng: 103.8485, deliveryAddress: '9 Bishan Place, Singapore 579837',
+      packageSize: 'small', priority: 'standard',
       deadlineTs: new Date(Date.now() + 3_600_000).toISOString(), volume: 1,
     }, maya);
     expect(mine.status).toBe(201);
@@ -114,7 +115,8 @@ describe('input validation', () => {
     const maya = await login(ctx.base, 'maya@demo.test');
     const storeId = (await c.get('/directory/merchants', maya)).body.merchants[0].stores[0].id;
     const res = await c.post('/customer/orders', {
-      storeId, deliveryLat: 5, deliveryLng: 5, packageSize: 'small', priority: 'standard',
+      storeId, deliveryLat: 1.3508, deliveryLng: 103.8485, deliveryAddress: '9 Bishan Place, Singapore 579837',
+      packageSize: 'small', priority: 'standard',
       deadlineTs: new Date(Date.now() - 3_600_000).toISOString(), volume: 1,
     }, maya);
     expect(res.status).toBe(400);

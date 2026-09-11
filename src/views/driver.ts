@@ -1,8 +1,8 @@
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, fmtTime, minutesUntil } from '../ui';
-import { mountLocationMap, mountRouteMap, type GeoPoint } from '../geoMap';
-import { gridToGeo, geoToGrid, routeFromHere } from '../geo';
+import { mountLocationMap, mountRouteMap, colorForRoad, type GeoPoint, type RoadInfo } from '../geoMap';
+import { routeFromHere } from '../geo';
 
 interface DriverDelivery {
   id: string; status: string; etaTs: string | null; estimatedDeliveryMinutes: number | null;
@@ -54,8 +54,10 @@ function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
   const here = me.address
     || (me.location ? `${me.location.lat.toFixed(6)}, ${me.location.lon.toFixed(6)}` : 'Current location unavailable');
   const mapCard = (selectable: boolean) => `<div class="card">
-    <div class="card-head"><h2>${selectable ? 'Your position' : 'Your route'}</h2><span class="muted">you are the teal dot</span></div>
-    ${selectable ? `<div id="driver-position-map" data-keep="driver-position-map" class="geo-map" data-driver-location="${me.location ? `${me.location.lat},${me.location.lon}` : ''}"></div><p class="muted geo-help">Click anywhere on the map to set your current position.</p>` : `<div id="driver-route-map" data-keep="driver-route-map" class="geo-map"></div>${!geoPoints.length ? '<p class="muted">Geo route data is not available for this delivery yet.</p>' : ''}`}
+    <div class="card-head"><h2>${selectable ? 'Your position' : 'Your route'}</h2><span class="muted">${selectable ? 'you are the teal dot' : 'hover a road for details, click to act'}</span></div>
+    ${selectable
+      ? `<div id="driver-position-map" data-keep="driver-position-map" class="geo-map" data-driver-location="${me.location ? `${me.location.lat},${me.location.lon}` : ''}"></div><p class="muted geo-help">Click anywhere on the map to set your current position.</p>`
+      : `<div id="driver-route-map" data-keep="driver-route-map" class="geo-map"></div>${!geoPoints.length ? '<p class="muted">Geo route data is not available for this delivery yet.</p>' : roadLegend(active)}`}
   </div>`;
 
   if (currentPage === 'account') {
@@ -92,6 +94,48 @@ function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
       </div>
       ${mapCard(false)}
     </div>`;
+}
+
+/** Same action taxonomy as the sidebar card, rendered inline for a road's click popup. */
+function roadActionHtml(d: DriverDelivery): string {
+  return d.status === 'assigned' ? `<button class="btn primary sm" data-map-accept="${esc(d.id)}">Accept — head to pickup</button>` :
+    d.status === 'en_route_pickup' ? `<button class="btn primary sm" data-map-do="picked_up" data-map-id="${esc(d.id)}">I've collected the package</button>` :
+    ['picked_up', 'en_route_drop'].includes(d.status) ? `<button class="btn primary sm" data-map-do="delivered" data-map-id="${esc(d.id)}">Mark delivered</button>` : '';
+}
+
+function roadPopup(d: DriverDelivery): string {
+  const mins = minutesUntil(d.etaTs);
+  const t = nextTarget(d);
+  return `<h4>Order ${esc(d.order.code)}</h4>
+    <div>${esc(d.order.customerName)} ${statusChip(d.status)}</div>
+    <div class="muted">➜ ${esc(t.label)}</div>
+    ${d.etaTs ? `<div class="muted">ETA ${esc(fmtTime(d.etaTs))}${mins !== null ? ` (${mins}m)` : ''}</div>` : ''}
+    ${roadActionHtml(d)}`;
+}
+
+/** One colored road per active delivery, trimmed to start at the driver's
+ *  current position — hover shows the order, click opens accept/status actions. */
+function buildRoads(active: DriverDelivery[], me: Me): RoadInfo[] {
+  const roads: RoadInfo[] = [];
+  active.forEach((d) => {
+    const toPickup = d.route?.path.toPickup ?? [];
+    const toDropoff = d.route?.path.toDropoff ?? [];
+    const phaseNodes = ['assigned', 'en_route_pickup'].includes(d.status) ? toPickup : toDropoff;
+    if (phaseNodes.length < 2) return;
+    const coords = routeFromHere(phaseNodes, me.location);
+    if (coords.length < 2) return;
+    roads.push({
+      coords, color: colorForRoad(d.id), label: `Order ${d.order.code}`,
+      detail: `${d.order.customerName} · ${d.status.replace(/_/g, ' ')}${d.etaTs ? ` · ETA ${fmtTime(d.etaTs)}` : ''}`,
+      popupHtml: roadPopup(d),
+    });
+  });
+  return roads;
+}
+
+function roadLegend(active: DriverDelivery[]): string {
+  if (active.length < 2) return '';
+  return `<div class="road-legend">${active.map((d) => `<span><i style="background:${colorForRoad(d.id)}"></i>${esc(d.order.code)}</span>`).join('')}</div>`;
 }
 
 function card(d: DriverDelivery): string {
@@ -136,16 +180,24 @@ function wire(el: HTMLElement, active: DriverDelivery[], me: Me): void {
   }
   const routeMap = el.querySelector<HTMLElement>('#driver-route-map');
   if (routeMap) {
-    const points: Array<GeoPoint & { kind: string; name: string; detail?: string }> = [];
-    const paths: [number, number][][] = [];
+    const points: Array<GeoPoint & { kind: string; name: string; detail?: string; address?: string | null }> = [];
     if (me.location) points.push({ ...me.location, kind: 'Driver', name: `You (${me.name})`, detail: me.status.replace(/_/g, ' ') });
     active.forEach((d) => {
       if (d.pickup.lat != null && d.pickup.lon != null) points.push({ lat: d.pickup.lat, lon: d.pickup.lon, kind: 'Pickup', name: d.pickup.name || 'Merchant', address: d.pickup.address, detail: d.order.code });
       if (d.dropoff.lat != null && d.dropoff.lon != null) points.push({ lat: d.dropoff.lat, lon: d.dropoff.lon, kind: 'Drop-off', name: d.order.customerName, address: d.dropoff.address, detail: d.order.code });
-      const path = [...(d.route?.path.toPickup ?? []), ...(d.route?.path.toDropoff ?? [])];
-      if (path.length > 1) paths.push(path.map((p) => [p.lat, p.lon]));
     });
-    mountRouteMap(routeMap, points, paths);
+    mountRouteMap(routeMap, points, buildRoads(active, me));
+    // Bind once — this container survives re-renders via [data-keep], so a
+    // per-render bind would stack duplicate handlers on every poll.
+    if (!routeMap.dataset.actionsBound) {
+      routeMap.dataset.actionsBound = '1';
+      routeMap.addEventListener('click', (e) => {
+        const accept = (e.target as HTMLElement).closest<HTMLElement>('[data-map-accept]');
+        if (accept) { run(() => post(`/driver/deliveries/${accept.dataset.mapAccept}/accept`), 'Accepted — navigate to the pickup', el); return; }
+        const doBtn = (e.target as HTMLElement).closest<HTMLElement>('[data-map-do]');
+        if (doBtn) run(() => post(`/driver/deliveries/${doBtn.dataset.mapId}/status`, { action: doBtn.dataset.mapDo }), doBtn.dataset.mapDo === 'delivered' ? 'Delivered!' : 'Pickup confirmed — head to the customer', el);
+      });
+    }
   }
   el.querySelectorAll<HTMLButtonElement>('[data-accept]').forEach((b) => b.addEventListener('click', () =>
     run(() => post(`/driver/deliveries/${b.dataset.accept}/accept`), 'Accepted — navigate to the pickup', el)));

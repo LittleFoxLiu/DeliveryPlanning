@@ -1,9 +1,9 @@
 import type { OrderDto, DriverDto, AgentEvent } from '../types';
 import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
-import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil } from '../ui';
-import { mountOverviewMap, searchNominatim } from '../geoMap';
-import { gridToGeo, routeFromHere } from '../geo';
+import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil, agentBadge } from '../ui';
+import { mountOverviewMap, searchNominatim, colorForRoad, type RoadInfo } from '../geoMap';
+import { routeFromHere } from '../geo';
 import { renderAdminOps } from './adminOps';
 import { renderAdminEval } from './adminEval';
 
@@ -87,14 +87,38 @@ function overviewPage(ov: Overview): string {
 
     <div class="grid2">
       <div class="card">
-        <div class="card-head"><h2>Network map</h2><span class="muted">Real-world locations</span></div>
+        <div class="card-head"><h2>Network map</h2><span class="muted">Real-world locations · hover a road, click for order info</span></div>
         <div id="admin-overview-map" data-keep="admin-overview-map" class="geo-map overview-map"></div>
       </div>
       <div class="card">
         <div class="card-head"><h2>Agent activity</h2><a class="muted" href="#/admin/orders">order details →</a></div>
         ${eventFeed(ov.events.map((e) => ({ agent: e.agent, message: e.message, ts: e.ts })))}
       </div>
-    </div>`;
+    </div>
+
+    ${howAgentsWorkCard()}`;
+}
+
+const PIPELINE_STEPS: { agent: string; role: string }[] = [
+  { agent: 'OrderAgent', role: 'validates a ready order — package, deadline, addresses' },
+  { agent: 'DriverAgent', role: 'gathers eligible drivers — capacity, vehicle fit, status' },
+  { agent: 'RoutingAgent', role: 'computes OSRM ETAs for each candidate driver' },
+  { agent: 'DispatchAgent', role: 'proposes an assignment; other agents may critique it' },
+  { agent: 'MonitoringAgent', role: 'watches active deliveries for delay or deviation' },
+  { agent: 'Coordinator', role: 'runs the loop, checks policy, executes or escalates' },
+];
+
+/** Always-visible summary of the multi-agent pipeline — the full per-run
+ *  decision trace lives on the Autonomous Ops page. */
+function howAgentsWorkCard(): string {
+  return `<div class="card" style="margin-top:18px">
+    <div class="card-head"><h2>How the agents work</h2><a class="muted" href="#/admin/ops">full decision traces →</a></div>
+    <p class="muted" style="margin-top:0">Every dispatch runs a propose → critique → revise → policy-check → execute loop. No single agent assigns a driver alone.</p>
+    <div class="pipeline">
+      ${PIPELINE_STEPS.map((s, i) => `<div class="pipeline-step">${agentBadge(s.agent)}<p>${esc(s.role)}</p></div>${i < PIPELINE_STEPS.length - 1 ? '<div class="pipeline-arrow">→</div>' : ''}`).join('')}
+    </div>
+    <p class="muted" style="margin-top:12px">A risky or low-confidence decision (no eligible driver, a tie, a policy gate failing) is escalated to a human dispatcher instead of executed autonomously — see <a href="#/admin/ops">Autonomous Ops</a>.</p>
+  </div>`;
 }
 
 function ordersCard(ov: Overview): string {
@@ -210,16 +234,28 @@ function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   const overviewMap = el.querySelector<HTMLElement>('#admin-overview-map');
   if (overviewMap) {
     const points: Array<{ lat: number; lon: number; name: string; kind: string; address?: string | null; detail?: string }> = [];
-    ov.drivers.forEach((d) => { if (d.location) points.push({ ...d.location, name: d.name, kind: 'Driver', detail: `${d.status} · ${d.currentOrderCount}/${d.capacity}` }); });
-    const paths: [number, number][][] = [];
-    ov.orders.forEach((o) => {
-      if (o.pickup.lat != null && o.pickup.lon != null) points.push({ lat: o.pickup.lat, lon: o.pickup.lon, name: o.storeName || 'Merchant pickup', kind: 'Pickup', address: o.pickup.address, detail: o.pickup.address || o.code });
-      if (o.dropoff.lat != null && o.dropoff.lon != null) points.push({ lat: o.dropoff.lat, lon: o.dropoff.lon, name: o.customerName, kind: 'Drop-off', address: o.dropoff.address, detail: o.dropoff.address || `${o.code} · ${o.status}` });
-      const route = o.delivery?.route;
-      const path = route ? [...(route.path.toPickup ?? []), ...(route.path.toDropoff ?? [])].map((p) => [p.lat, p.lon] as [number, number]) : [];
-      if (path.length > 1) paths.push(path);
+    const driverLoc = new Map<string, { lat: number; lon: number }>();
+    ov.drivers.forEach((d) => {
+      if (!d.location) return;
+      points.push({ ...d.location, name: d.name, kind: 'Driver', detail: `${d.status} · ${d.currentOrderCount}/${d.capacity}` });
+      driverLoc.set(d.id, d.location);
     });
-    mountOverviewMap(overviewMap, points, paths);
+    const roads: RoadInfo[] = [];
+    ov.orders.forEach((o) => {
+      if (o.pickup.lat != null && o.pickup.lon != null) points.push({ lat: o.pickup.lat, lon: o.pickup.lon, name: o.storeName || 'Merchant pickup', kind: 'Pickup', address: o.pickup.address, detail: o.code });
+      if (o.dropoff.lat != null && o.dropoff.lon != null) points.push({ lat: o.dropoff.lat, lon: o.dropoff.lon, name: o.customerName, kind: 'Drop-off', address: o.dropoff.address, detail: o.code });
+      const route = o.delivery?.route;
+      const nodes = route ? [...(route.path.toPickup ?? []), ...(route.path.toDropoff ?? [])] : [];
+      if (nodes.length < 2) return;
+      const from = o.delivery?.driverId ? driverLoc.get(o.delivery.driverId) : undefined;
+      const coords = routeFromHere(nodes, from ?? null);
+      if (coords.length < 2) return;
+      roads.push({
+        coords, color: colorForRoad(o.id), label: `Order ${o.code}`,
+        detail: `${o.customerName} · ${o.status.replace(/_/g, ' ')}`,
+      });
+    });
+    mountOverviewMap(overviewMap, points, roads);
   }
   const repaint = () => renderAdmin(el, null, currentPage);
   el.querySelectorAll<HTMLInputElement>('[data-address-search]').forEach((input) => {

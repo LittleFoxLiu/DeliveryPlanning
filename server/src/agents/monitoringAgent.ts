@@ -20,11 +20,9 @@ export const monitoringTools = {
    *  provider is configured. */
   detect_delay: (delivery: DeliveryRow, projected: { totalMinutes: number; baselineMinutes: number }, order: OrderRow) => {
     const deadlineMs = Date.parse(order.deadline_ts);
-    const projectedDoneMs = Date.now() + (Number.isFinite(projected.totalMinutes) ? projected.totalMinutes * 60_000 : 9e12);
-    const slipMin = Number.isFinite(projected.totalMinutes)
-      ? Math.round(projected.totalMinutes - projected.baselineMinutes)
-      : 9999;
-    void delivery;
+    const projectedDoneMs = Date.now() + (Number.isFinite(projectedTotalMin) ? projectedTotalMin * 60_000 : 9e12);
+    const originalEta = delivery.estimated_delivery_minutes ?? projectedTotalMin;
+    const slipMin = Number.isFinite(projectedTotalMin) ? Math.round(projectedTotalMin - originalEta) : 9999;
     return {
       delayed: slipMin >= DELAY_THRESHOLD_MIN || projectedDoneMs > deadlineMs,
       slipMin,

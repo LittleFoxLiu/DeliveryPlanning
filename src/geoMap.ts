@@ -38,23 +38,31 @@ const inScopePaths = (path: [number, number][]) => {
   if (segment.length > 1) segments.push(segment);
   return segments;
 };
-const pointPopup = (point: GeoPoint & { kind?: string; name?: string; detail?: string }) => {
-  const title = point.name || point.kind || 'Singapore location';
-  const address = point.address && point.address !== title ? `<br>${html(point.address)}` : '';
-  const detail = point.detail && point.detail !== point.address ? `<br><small>${html(point.detail)}</small>` : '';
-  return `<strong>${html(title)}</strong>${address}${detail}<br><small>${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}</small>`;
-};
 
 const TIP_OPTS: L.TooltipOptions = { direction: 'top', offset: [0, -12], opacity: 1, className: 'geo-tip' };
-/** Show marker info on hover, not on click. */
-function hoverInfo(marker: L.Marker, content: string): L.Marker {
-  return marker.bindTooltip(content, TIP_OPTS);
+const LINE_TIP_OPTS: L.TooltipOptions = { sticky: true, opacity: 1, className: 'geo-tip' };
+/** Show marker/road info on hover, not on click. */
+function hoverInfo<T extends L.Layer>(layer: T, content: string, sticky = false): T {
+  layer.bindTooltip(content, sticky ? LINE_TIP_OPTS : TIP_OPTS);
+  return layer;
+}
+
+// Stable color per road so the same delivery always draws the same color
+// across re-renders, and different deliveries are easy to tell apart.
+const ROAD_PALETTE = ['#159c99', '#df553d', '#7c5cbf', '#d69c1e', '#3577d1', '#c23b7a', '#1f9e4c', '#a1521a'];
+export function colorForRoad(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return ROAD_PALETTE[h % ROAD_PALETTE.length];
 }
 
 const TILE_URL = import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const TILE_OPTS: L.TileLayerOptions = { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 };
 
-interface LiveMap { map: L.Map; overlay: L.LayerGroup; fitted: boolean; clickHandler?: (e: L.LeafletMouseEvent) => void }
+interface LiveMap {
+  map: L.Map; overlay: L.LayerGroup; fitted: boolean;
+  onSelect?: (p: GeoPoint) => void; clickBound?: boolean;
+}
 /** One persistent Leaflet instance per DOM node — survives view re-renders. */
 const LIVE = new WeakMap<HTMLElement, LiveMap>();
 
@@ -77,24 +85,46 @@ function liveMap(container: HTMLElement, opts?: L.MapOptions): LiveMap {
   return entry;
 }
 
-interface MarkerPoint { lat: number; lon: number; kind: string; name: string; detail?: string }
+interface MarkerPoint { lat: number; lon: number; kind: string; name: string; detail?: string; address?: string | null }
 
-/** Replace the markers + polylines on a live map without touching the base map. */
-function drawOverlay(entry: LiveMap, points: MarkerPoint[], paths: Array<[number, number][]>, fitZoom = 15): void {
+/** A route segment drawn on the map — hoverable, optionally clickable, and
+ *  colored distinctly so several deliveries are easy to tell apart. */
+export interface RoadInfo {
+  coords: [number, number][];
+  color?: string;
+  label: string;
+  detail?: string;
+  /** Rich HTML shown in a click-to-open popup (e.g. order info + an Accept button). */
+  popupHtml?: string;
+  onClick?: () => void;
+}
+
+function roadsInScope(roads: RoadInfo[]): RoadInfo[] {
+  const out: RoadInfo[] = [];
+  for (const r of roads) for (const seg of inScopePaths(r.coords)) out.push({ ...r, coords: seg });
+  return out;
+}
+
+/** Replace the markers + roads on a live map without touching the base map. */
+function drawOverlay(entry: LiveMap, points: MarkerPoint[], roads: RoadInfo[], fitZoom = 15): void {
   entry.overlay.clearLayers();
   const layers: L.Layer[] = [];
   for (const p of points) {
     if (!Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue;
+    const address = p.address && p.address !== p.name ? `<br>${html(p.address)}` : '';
     const m = hoverInfo(
       L.marker([p.lat, p.lon], { icon: iconFor(p.kind) }),
-      `<strong>${html(p.kind)}</strong><br>${html(p.name)}${p.detail ? `<br>${html(p.detail)}` : ''}`,
+      `<strong>${html(p.kind)}</strong><br>${html(p.name)}${address}${p.detail ? `<br><small>${html(p.detail)}</small>` : ''}`,
     );
     m.addTo(entry.overlay);
     layers.push(m);
   }
-  for (const path of paths.flatMap(inScopePaths)) {
-    if (path.length < 2) continue;
-    const line = L.polyline(path, { color: '#159c99', weight: 6, opacity: .85 });
+  for (const r of roadsInScope(roads)) {
+    if (r.coords.length < 2) continue;
+    const line = L.polyline(r.coords, { color: r.color || '#159c99', weight: 6, opacity: .85 });
+    hoverInfo(line, `<strong>${html(r.label)}</strong>${r.detail ? `<br>${html(r.detail)}` : ''}`, true);
+    if (r.popupHtml) line.bindPopup(r.popupHtml, { maxWidth: 260, className: 'geo-popup' });
+    if (r.onClick) { const cb = r.onClick; line.on('click', () => cb()); }
     line.addTo(entry.overlay);
     layers.push(line);
   }
@@ -207,7 +237,7 @@ export function openLocationPicker(initial: GeoPoint | null, onSelect: (point: G
 
 /** Click-to-pick location map. Idempotent — keeps the instance (and the user's
  *  pan) across re-renders while re-binding the current callback / marker. */
-export function mountLocationMap(container: HTMLElement, initial: GeoPoint | null, onSelect: (point: GeoPoint) => void, route: GeoRoute | null = null): () => void {
+export function mountLocationMap(container: HTMLElement, initial: GeoPoint | null, onSelect: (point: GeoPoint) => void, route: GeoRoute | null = null): void {
   const safeInitial = initial && inSingapore(initial) ? initial : null;
   const entry = liveMap(container, { center: safeInitial ? [safeInitial.lat, safeInitial.lon] : [1.295, 103.855], zoom: 13 });
   const map = entry.map;

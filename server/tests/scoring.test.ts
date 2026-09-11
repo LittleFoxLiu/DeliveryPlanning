@@ -29,9 +29,9 @@ describe('scoring engine', () => {
     expect(s.contributions.eta).toBeGreaterThan(s.contributions.efficiency);
   });
 
-  it('selects the shortest driver→pickup trip (current distance-only policy)', () => {
-    const close = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_close' }), estimate(2, 70));
-    const far = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_far' }), estimate(14, 14));
+  it('selects the shorter total trip (pickup + dropoff)', () => {
+    const close = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_close' }), estimate(2, 8));
+    const far = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_far' }), estimate(14, 20));
     expect(compareAssignments([close, far]).winner?.driverId).toBe('drv_close');
   });
 
@@ -56,9 +56,9 @@ describe('scoring engine', () => {
     expect(scoreDriver(baseOrder(), baseDriver({ status: 'break' }), estimate(5, 5)).disqualifiers).toContain('driver_on_break');
   });
 
-  it('picks the driver nearest the pickup, then reports a margin', () => {
-    const near = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_near' }), estimate(4, 40));
-    const farther = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_far' }), estimate(12, 12));
+  it('picks the driver with the shorter total trip, then reports a margin', () => {
+    const near = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_near' }), estimate(4, 10));
+    const farther = scoreDriver(baseOrder(), baseDriver({ driverId: 'drv_far' }), estimate(12, 25));
     const cmp = compareAssignments([near, farther]);
     expect(cmp.winner?.driverId).toBe('drv_near');
     expect(cmp.rationale).toMatch(/margin/);

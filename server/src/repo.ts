@@ -9,8 +9,8 @@ const inList = (n: number) => Array.from({ length: n }, () => '?').join(', ');
 export interface UserRow { id: string; email: string; role: 'admin' | 'merchant' | 'driver' | 'customer'; name: string; ref_id: string | null }
 
 export const users = {
-  async create(input: { email: string; passwordHash: string; passwordSalt: string; role: UserRow['role']; name: string; refId: string | null }): Promise<UserRow> {
-    const uid = id('usr');
+  async create(input: { id?: string; email: string; passwordHash: string; passwordSalt: string; role: UserRow['role']; name: string; refId: string | null }): Promise<UserRow> {
+    const uid = input.id ?? id('usr');
     await q(`INSERT INTO users (id, email, password_hash, password_salt, role, name, ref_id) VALUES (?,?,?,?,?,?,?)`,
       [uid, input.email.toLowerCase(), input.passwordHash, input.passwordSalt, input.role, input.name, input.refId]);
     return { id: uid, email: input.email.toLowerCase(), role: input.role, name: input.name, ref_id: input.refId };
