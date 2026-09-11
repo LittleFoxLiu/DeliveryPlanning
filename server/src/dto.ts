@@ -121,7 +121,7 @@ export async function orderTrackingView(o: OrderRow) {
   return {
     order: {
       id: o.id, status: o.status, priority: o.priority, deadlineTs: o.deadline_ts,
-      pickup: { lat: o.pickup_latitude, lon: o.pickup_longitude, address: store?.address ?? null },
+      pickup: { lat: o.pickup_latitude, lon: o.pickup_longitude, address: store?.address ?? null, name: store?.name ?? null },
       dropoff: { lat: o.delivery_latitude, lon: o.delivery_longitude, address: o.delivery_address }, items,
     },
     delivery: delivery

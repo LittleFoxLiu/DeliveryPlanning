@@ -3,8 +3,8 @@ import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../mai
 import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
 import type { GeoPoint as StoredGeoPoint, ProductDto } from '../types';
-import { mountLocationMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
-import { gridToGeo, geoToGrid, routeFromHere } from '../geo';
+import { mountLocationMap, mountRouteMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute, type RoadInfo } from '../geoMap';
+import { routeFromHere } from '../geo';
 
 interface Tracking {
   order: { id: string; status: string; priority: string; deadlineTs: string; pickup?: StoredGeoPoint & { address?: string; name?: string }; dropoff: StoredGeoPoint & { address?: string }; items: { name: string; qty: number }[] };
@@ -62,6 +62,20 @@ function repaint(el: HTMLElement): void {
   else resetSig('customer');
 }
 
+/** Picking a different order used to just re-render the *previous* order's
+ *  cached tracking data and wait for the next 4s poll to catch up — from the
+ *  user's perspective, the click did nothing until then. Fetch the newly
+ *  selected order's tracking immediately instead. */
+async function refreshTracking(el: HTMLElement): Promise<void> {
+  try {
+    if (selected) { try { lastTracking = await get<Tracking>(`/customer/orders/${selected}`); } catch { lastTracking = null; } }
+    resetSig('customer');
+    repaint(el);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) handleUnauthed();
+  }
+}
+
 async function loadCatalog(el: HTMLElement): Promise<void> {
   catalog = [];
   if (pickedMerchantId) {
@@ -84,7 +98,7 @@ function view(orders: { id: string; status: string }[], t: Tracking | null): str
       <div>
         ${orders.length ? `<div class="card">
           <div class="card-head"><h2>Orders</h2></div>
-          <div class="pill-row">${orders.map((o) => `<button class="chip-btn" style="width:auto" data-pick="${esc(o.id)}">#${esc(o.id.replace(/^ord_/, '').slice(-6).toUpperCase())} ${customerChip(o.status)}</button>`).join('')}</div>
+          <div class="pill-row">${orders.map((o) => `<button class="chip-btn${o.id === selected ? ' selected' : ''}" style="width:auto" data-pick="${esc(o.id)}">#${esc(o.id.replace(/^ord_/, '').slice(-6).toUpperCase())} ${customerChip(o.status)}</button>`).join('')}</div>
         </div>` : ''}
         ${t ? trackingCard(t) : ''}
         ${t ? agentDecisionCard(t.run) : ''}
@@ -103,6 +117,7 @@ function trackingCard(t: Tracking): string {
     <div class="big-eta">${done ? 'Delivered' : t.delivery?.etaTs ? `${fmtTime(t.delivery.etaTs)}` : 'Pending'}</div>
     <p class="muted">${done ? `Arrived ${fmtTime(t.delivery?.deliveredAt)}` : mins !== null ? `about ${mins} minutes away` : 'Waiting for a driver'}</p>
     <dl class="kv" style="margin-top:12px">
+      <dt>Store</dt><dd>${esc(t.order.pickup?.name || 'Merchant')}${t.order.pickup?.address ? ` — ${esc(t.order.pickup.address)}` : ''}</dd>
       <dt>Items</dt><dd>${t.order.items.map((i) => `${esc(i.name)} ×${i.qty}`).join(', ')}</dd>
       <dt>Driver</dt><dd>${t.delivery?.driver ? `${esc(t.delivery.driver.firstName)} · ${esc(t.delivery.driver.vehicleType)}` : '—'}</dd>
       <dt>Deadline</dt><dd>${fmtTime(t.order.deadlineTs)}</dd>
@@ -171,7 +186,7 @@ function stepDelivery(): string {
       <label class="full">Delivery address<input id="delivery-search" placeholder="Type an address or search with Nominatim" autocomplete="off" value="${esc(deliveryGeo?.address || deliveryGeo?.name || deliveryAddress)}"></label>
       <button type="button" class="btn full" data-open-location-picker>Open map in a new window</button>
       <div id="delivery-results" class="geo-results full"></div>
-      <div id="delivery-map" class="geo-map full"></div>
+      <div id="delivery-map" data-keep="delivery-map" class="geo-map full"></div>
       <p class="muted full geo-help">Click the map to drop your delivery pin. ${deliveryGeo ? `Selected: <strong>${esc(deliveryGeo.address || deliveryGeo.name || 'Singapore location')}</strong>` : 'No pin selected yet.'}</p>
       <input name="deliveryLat" type="hidden" value="${deliveryGeo?.lat ?? ''}">
       <input name="deliveryLng" type="hidden" value="${deliveryGeo?.lon ?? ''}">
@@ -218,16 +233,44 @@ function saveDeliveryForm(el: HTMLElement): void {
   draft.note = String(fd.get('note') || '');
 }
 
+/** Two colored legs — teal to the store, orange to the customer — so progress
+ *  between the driver and the delivery is easy to read at a glance. Whichever
+ *  leg is currently underway is trimmed to start at the driver's live position. */
+function buildCustomerRoads(t: Tracking): RoadInfo[] {
+  const path = t.delivery?.route?.path;
+  if (!path) return [];
+  const pickedUp = t.delivery ? ['picked_up', 'en_route_drop', 'delivered'].includes(t.delivery.status) : false;
+  const driverPos = t.delivery?.driverPosition ?? null;
+  const roads: RoadInfo[] = [];
+  const toPickup = path.toPickup ?? [];
+  const toDropoff = path.toDropoff ?? [];
+  if (toPickup.length > 1) {
+    roads.push({
+      coords: pickedUp ? toPickup.map((p) => [p.lat, p.lon] as [number, number]) : routeFromHere(toPickup, driverPos),
+      color: pickedUp ? '#c7cad1' : '#159c99',
+      label: 'To the store', detail: pickedUp ? 'Completed' : 'Your driver is heading to the store',
+    });
+  }
+  if (toDropoff.length > 1) {
+    roads.push({
+      coords: pickedUp ? routeFromHere(toDropoff, driverPos) : toDropoff.map((p) => [p.lat, p.lon] as [number, number]),
+      color: '#df553d',
+      label: 'To you', detail: pickedUp ? 'Your driver is on the way to you' : 'Next leg, after pickup',
+    });
+  }
+  return roads;
+}
+
 function wire(el: HTMLElement): void {
   const liveMap = el.querySelector<HTMLElement>('#customer-live-map');
   if (liveMap && lastTracking?.order.dropoff.lat != null && lastTracking.order.dropoff.lon != null) {
-    const points: Array<GeoPoint & { kind: string; name: string }> = [{ lat: lastTracking.order.dropoff.lat, lon: lastTracking.order.dropoff.lon, kind: 'Drop-off', name: 'Delivery address', address: lastTracking.order.dropoff.address }];
-    if (lastTracking.order.pickup?.lat != null && lastTracking.order.pickup.lon != null) points.push({ lat: lastTracking.order.pickup.lat, lon: lastTracking.order.pickup.lon, kind: 'Pickup', name: 'Merchant pickup', address: lastTracking.order.pickup.address });
-    if (lastTracking.delivery?.driverPosition) points.push({ lat: lastTracking.delivery.driverPosition.lat, lon: lastTracking.delivery.driverPosition.lon, kind: 'Driver', name: 'Your driver' });
-    const path = [...(lastTracking.delivery?.route?.path.toPickup ?? []), ...(lastTracking.delivery?.route?.path.toDropoff ?? [])];
-    import('../geoMap').then(({ mountRouteMap }) => mountRouteMap(liveMap, points, path.length > 1 ? [path.map((p) => [p.lat, p.lon] as [number, number])] : []));
+    const t = lastTracking;
+    const points: Array<GeoPoint & { kind: string; name: string; address?: string | null }> = [{ lat: t.order.dropoff.lat, lon: t.order.dropoff.lon, kind: 'Drop-off', name: 'Delivery address', address: t.order.dropoff.address }];
+    if (t.order.pickup?.lat != null && t.order.pickup.lon != null) points.push({ lat: t.order.pickup.lat, lon: t.order.pickup.lon, kind: 'Pickup', name: t.order.pickup.name || 'Merchant pickup', address: t.order.pickup.address });
+    if (t.delivery?.driverPosition) points.push({ lat: t.delivery.driverPosition.lat, lon: t.delivery.driverPosition.lon, kind: 'Driver', name: 'Your driver' });
+    mountRouteMap(liveMap, points, buildCustomerRoads(t));
   }
-  el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; repaint(el); }));
+  el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; refreshTracking(el); }));
 
   el.querySelectorAll<HTMLButtonElement>('[data-pick-store]').forEach((b) => b.addEventListener('click', () => {
     if (pickedStoreId !== b.dataset.pickStore) { cart = {}; deliveryGeo = null; deliveryRoute = null; }

@@ -4,6 +4,7 @@ import { users, merchants, stores, customers, drivers, orders, products } from '
 import { minutesFromNow } from './util.js';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD || 'demo1234';
 
@@ -130,10 +131,18 @@ export async function seed(opts: { reset?: boolean } = {}): Promise<void> {
   }
 }
 
+// Demo accounts get a stable id derived from their email (instead of a random
+// one) so a session started before an evaluation run — which wipes and
+// reseeds the database — keeps resolving to the same user afterward instead
+// of being logged out.
+function demoUserId(email: string): string {
+  return `usr_${createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0, 20)}`;
+}
+
 async function mkUser(email: string, role: 'admin' | 'merchant' | 'driver' | 'customer', name: string, refId: string | null) {
   if (await users.byEmail(email)) return;
   const { hash, salt } = hashPassword(DEMO_PASSWORD);
-  await users.create({ email, passwordHash: hash, passwordSalt: salt, role, name, refId });
+  await users.create({ id: demoUserId(email), email, passwordHash: hash, passwordSalt: salt, role, name, refId });
 }
 
 const isMain = process.argv[1] && typeof import.meta.url === 'string' && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
