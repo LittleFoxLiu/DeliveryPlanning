@@ -54,7 +54,7 @@ function hoverInfo(marker: L.Marker, content: string): L.Marker {
 const TILE_URL = import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const TILE_OPTS: L.TileLayerOptions = { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 };
 
-interface LiveMap { map: L.Map; overlay: L.LayerGroup; fitted: boolean; pickMarker?: L.Marker; pickLine?: L.Polyline; clickHandler?: (e: L.LeafletMouseEvent) => void }
+interface LiveMap { map: L.Map; overlay: L.LayerGroup; fitted: boolean; clickHandler?: (e: L.LeafletMouseEvent) => void }
 /** One persistent Leaflet instance per DOM node — survives view re-renders. */
 const LIVE = new WeakMap<HTMLElement, LiveMap>();
 
@@ -68,11 +68,12 @@ function liveMap(container: HTMLElement, opts?: L.MapOptions): LiveMap {
     return existing;
   }
   existing?.map.remove();
-  const map = L.map(container, { maxBounds: bounds, minZoom: 11, maxZoom: 19, ...opts });
+  const map = L.map(container, { maxBounds: SINGAPORE_BOUNDS, maxBoundsViscosity: 1, minZoom: 11, maxZoom: 19, ...opts });
   L.tileLayer(TILE_URL, TILE_OPTS).addTo(map);
   const overlay = L.layerGroup().addTo(map);
   const entry: LiveMap = { map, overlay, fitted: false };
   LIVE.set(container, entry);
+  if (opts?.center && opts.zoom !== undefined) map.setView(opts.center, opts.zoom);
   return entry;
 }
 
@@ -91,18 +92,20 @@ function drawOverlay(entry: LiveMap, points: MarkerPoint[], paths: Array<[number
     m.addTo(entry.overlay);
     layers.push(m);
   }
-  for (const path of paths) {
+  for (const path of paths.flatMap(inScopePaths)) {
     if (path.length < 2) continue;
     const line = L.polyline(path, { color: '#159c99', weight: 6, opacity: .85 });
     line.addTo(entry.overlay);
     layers.push(line);
   }
   // Fit to content only on the first paint — later updates keep the user's view.
-  if (!entry.fitted && layers.length) {
+  if (!entry.fitted && layers.length > 1) {
     entry.map.fitBounds(L.featureGroup(layers).getBounds(), { padding: [35, 35], maxZoom: fitZoom });
     entry.fitted = true;
   } else if (!entry.fitted && !layers.length) {
     entry.map.setView([1.3521, 103.8198], 12);
+    entry.fitted = true;
+  } else if (!entry.fitted) {
     entry.fitted = true;
   }
 }
@@ -206,33 +209,47 @@ export function openLocationPicker(initial: GeoPoint | null, onSelect: (point: G
  *  pan) across re-renders while re-binding the current callback / marker. */
 export function mountLocationMap(container: HTMLElement, initial: GeoPoint | null, onSelect: (point: GeoPoint) => void, route: GeoRoute | null = null): () => void {
   const safeInitial = initial && inSingapore(initial) ? initial : null;
-  const map = L.map(container, { maxBounds: SINGAPORE_BOUNDS, maxBoundsViscosity: 1, minZoom: 11, maxZoom: 19 }).setView(safeInitial ? [safeInitial.lat, safeInitial.lon] : [1.295, 103.855], 13);
-  L.tileLayer(import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
-  let marker: L.Marker | undefined;
-  let line: L.Polyline | undefined;
-  const placeMarker = (point: GeoPoint) => { marker?.remove(); marker = L.marker([point.lat, point.lon], { icon: iconFor('Drop-off') }).addTo(map).bindPopup(`<strong>${html(point.address || point.name || 'Selected Singapore location')}</strong><br><small>${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}</small>`); };
+  const entry = liveMap(container, { center: safeInitial ? [safeInitial.lat, safeInitial.lon] : [1.295, 103.855], zoom: 13 });
+  const map = entry.map;
+  if (entry.clickHandler) map.off('click', entry.clickHandler);
   const select = (point: GeoPoint) => {
     if (!singaporeBounds.contains([point.lat, point.lon])) return;
-    placeMarker(point); marker?.openPopup(); onSelect(point);
+    entry.overlay.clearLayers();
+    const marker = L.marker([point.lat, point.lon], { icon: iconFor('Drop-off') })
+      .addTo(entry.overlay)
+      .bindPopup(`<strong>${html(point.address || point.name || 'Selected Singapore location')}</strong><br><small>${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}</small>`);
+    marker.openPopup();
+    onSelect(point);
   };
-  if (safeInitial) placeMarker(safeInitial);
-  map.on('click', async (event: L.LeafletMouseEvent) => {
+  const clickHandler = async (event: L.LeafletMouseEvent) => {
     try { select(await reverseNominatim(event.latlng.lat, event.latlng.lng)); } catch { /* wait for a valid Nominatim address */ }
-  });
+  };
+  entry.clickHandler = clickHandler;
+  map.on('click', clickHandler);
+  entry.overlay.clearLayers();
+  const layers: L.Layer[] = [];
+  if (safeInitial) {
+    layers.push(L.marker([safeInitial.lat, safeInitial.lon], { icon: iconFor('Drop-off') })
+      .addTo(entry.overlay)
+      .bindPopup(`<strong>${html(safeInitial.address || safeInitial.name || 'Selected Singapore location')}</strong><br><small>${safeInitial.lat.toFixed(6)}, ${safeInitial.lon.toFixed(6)}</small>`));
+  }
   const routeGeometry = route && route.geometry.every((point) => singaporeBounds.contains(point)) ? route.geometry : [];
-  if (routeGeometry.length > 1) { line = L.polyline(routeGeometry, { color: '#df553d', weight: 6, opacity: .9 }).addTo(map); map.fitBounds(line.getBounds(), { padding: [35, 35], maxZoom: 15 }); }
-  return () => { line?.remove(); marker?.remove(); map.remove(); };
+  if (routeGeometry.length > 1) layers.push(L.polyline(routeGeometry, { color: '#df553d', weight: 6, opacity: .9 }).addTo(entry.overlay));
+  if (!entry.fitted && layers.length > 1) {
+    map.fitBounds(L.featureGroup(layers).getBounds(), { padding: [35, 35], maxZoom: 15 });
+    entry.fitted = true;
+  } else if (!entry.fitted) {
+    entry.fitted = true;
+  }
+  return () => destroy(container);
 }
 
 export function mountOverviewMap(container: HTMLElement, points: Array<GeoPoint & { kind: string; detail?: string }>, paths: Array<[number, number][]> = []): () => void {
   const scopedPoints = points.filter(inSingapore);
   const user = scopedPoints.find((point) => point.kind === 'Driver');
-  const map = L.map(container, { maxBounds: SINGAPORE_BOUNDS, maxBoundsViscosity: 1, minZoom: 11, maxZoom: 19 }).setView(user ? [user.lat, user.lon] : [1.295, 103.855], user ? 14 : 13);
-  L.tileLayer(import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
-  const layers: L.Layer[] = scopedPoints.map((point) => L.marker([point.lat, point.lon], { icon: iconFor(point.kind) }).addTo(map).bindPopup(pointPopup(point)));
-  paths.flatMap(inScopePaths).forEach((path) => layers.push(L.polyline(path, { color: '#159c99', weight: 6, opacity: .85 }).addTo(map)));
-  if (layers.length > 1) map.fitBounds(L.featureGroup(layers).getBounds(), { padding: [35, 35], maxZoom: 15 });
-  return () => map.remove();
+  const entry = liveMap(container, { center: user ? [user.lat, user.lon] : [1.295, 103.855], zoom: user ? 14 : 13 });
+  drawOverlay(entry, scopedPoints as MarkerPoint[], paths, 15);
+  return () => destroy(container);
 }
 
 /** Driver / customer route map. Idempotent — same instance across re-renders,
@@ -244,11 +261,7 @@ export function mountRouteMap(
 ): () => void {
   const scopedPoints = points.filter(inSingapore);
   const driver = scopedPoints.find((point) => point.kind === 'Driver');
-  const map = L.map(container, { maxBounds: SINGAPORE_BOUNDS, maxBoundsViscosity: 1, minZoom: 11, maxZoom: 19 }).setView(driver ? [driver.lat, driver.lon] : [1.3521, 103.8198], driver ? 14 : 12);
-  L.tileLayer(import.meta.env.VITE_MAP_PROVIDER_URL || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
-  const layers: L.Layer[] = scopedPoints.map((point) => L.marker([point.lat, point.lon], { icon: iconFor(point.kind) }).addTo(map).bindPopup(pointPopup(point)));
-  paths.flatMap(inScopePaths).forEach((path) => layers.push(L.polyline(path, { color: '#159c99', weight: 6, opacity: .85 }).addTo(map)));
-  const group = L.featureGroup(layers);
-  if (layers.length > 1) map.fitBounds(group.getBounds(), { padding: [30, 30], maxZoom: 15 });
-  return () => map.remove();
+  const entry = liveMap(container, { center: driver ? [driver.lat, driver.lon] : [1.3521, 103.8198], zoom: driver ? 14 : 12 });
+  drawOverlay(entry, scopedPoints, paths, 15);
+  return () => destroy(container);
 }

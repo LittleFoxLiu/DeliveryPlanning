@@ -6,6 +6,7 @@ import { rateLimit, h } from './http.js';
 import { badRequest, forbidden, notFound, conflict, HttpError } from './util.js';
 import { asObject, str, enumVal, int, coord, futureTs, idParam } from './validation.js';
 import { gridToGeo, geoToGrid } from './engine/geo.js';
+import { isWithinSingapore } from './geo.js';
 import {
   users, merchants, stores, customers, drivers, orders, deliveries, memberships, products,
   type OrderItemInput, type ProductRow, type UserRow,
@@ -52,8 +53,8 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
 
   if (role === 'merchant') {
     const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
-    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress');
-    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), latitude: location.lat, longitude: location.lon, address: location.address });
+    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress', 'storeGeoLat', 'storeGeoLng');
+    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), latitude: location.geoLat, longitude: location.geoLng, address: location.address || '' });
     refId = merchant.id;
   } else if (role === 'customer') {
     refId = (await customers.create(name)).id;
@@ -64,8 +65,8 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
       vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
       capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }),
       maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
-      lat: loc.lat, lng: loc.lng, status: 'available',
-      address: loc.address, geoLat: loc.geoLat, geoLng: loc.geoLng,
+      latitude: loc.geoLat, longitude: loc.geoLng, status: 'available',
+      address: loc.address,
     });
     refId = created.id;
   }
@@ -144,16 +145,16 @@ api.post('/onboarding/role', authenticate(true), authLimiter, h(async (req, res)
   let refId = current.ref_id;
   if (role === 'merchant') {
     const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
-    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress');
-    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), latitude: location.lat, longitude: location.lon, address: location.address });
+    const location = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress', 'storeGeoLat', 'storeGeoLng');
+    await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), latitude: location.geoLat, longitude: location.geoLng, address: location.address || '' });
     refId = merchant.id;
   } else if (role === 'driver') {
     const loc = locationPoint(b, 'lat', 'lng', 'address', 'geoLat', 'geoLng');
     const driver = await drivers.create({
       name: current.name, vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
       capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }), maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
-      lat: loc.lat, lng: loc.lng, status: 'available',
-      address: loc.address, geoLat: loc.geoLat, geoLng: loc.geoLng,
+      latitude: loc.geoLat, longitude: loc.geoLng, status: 'available',
+      address: loc.address,
     });
     refId = driver.id;
   } else if (role === 'customer') {
@@ -234,9 +235,9 @@ api.post('/merchant/orders', ...merchantOnly, h(async (req, res) => {
     customer_id: customer.id,
     pickup_latitude: store.latitude,
     pickup_longitude: store.longitude,
-    delivery_latitude: dest.lat,
-    delivery_longitude: dest.lon,
-    delivery_address: dest.address,
+      delivery_latitude: dest.geoLat,
+      delivery_longitude: dest.geoLng,
+      delivery_address: dest.address || '',
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
     package_size: resolved.packageSize,
@@ -363,9 +364,9 @@ api.post('/customer/orders', ...customerOnly, h(async (req, res) => {
     customer_id: req.user!.refId!,
     pickup_latitude: store.latitude,
     pickup_longitude: store.longitude,
-    delivery_latitude: dest.lat,
-    delivery_longitude: dest.lon,
-    delivery_address: dest.address,
+      delivery_latitude: dest.geoLat,
+      delivery_longitude: dest.geoLng,
+      delivery_address: dest.address || '',
     priority: enumVal(b, 'priority', ['standard', 'express'] as const, 'standard'),
     deadline_ts: futureTs(b, 'deadlineTs', { maxHours: 12 }),
     package_size: resolved.packageSize,
@@ -463,7 +464,7 @@ api.post('/driver/location', ...driverOnly, h(async (req, res) => {
   if (!driver) throw notFound('Driver profile not found');
   if (driver.status === 'available') throw conflict('Set your status to break or offline before changing your position');
   const loc = locationPoint(b, 'lat', 'lng', 'address', 'geoLat', 'geoLng');
-  await drivers.recordLocation(req.user!.refId!, loc.lat, loc.lng, loc.address, loc.geoLat, loc.geoLng);
+  await drivers.recordLocation(req.user!.refId!, loc.geoLat, loc.geoLng, loc.address);
   res.json({ ok: true });
 }));
 
@@ -505,8 +506,8 @@ api.post('/admin/merchants', ...adminOnly, h(async (req, res) => {
   const store = await stores.create({
     merchantId: merchant.id,
     name: str(b, 'storeName', { min: 1, max: 120 }),
-    pickupLat: loc.lat, pickupLng: loc.lng,
-    address: loc.address, geoLat: loc.geoLat, geoLng: loc.geoLng,
+    latitude: loc.geoLat, longitude: loc.geoLng,
+    address: loc.address || '',
   });
   const contact = str(b, 'contactName', { min: 1, max: 120 });
   const credentials = await provisionUser(str(b, 'email', { max: 200 }), 'merchant', contact, merchant.id);
@@ -526,8 +527,8 @@ api.post('/admin/drivers', ...adminOnly, h(async (req, res) => {
     vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
     capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }),
     maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
-    lat: loc.lat, lng: loc.lng, status: 'available',
-    address: loc.address, geoLat: loc.geoLat, geoLng: loc.geoLng,
+    latitude: loc.geoLat, longitude: loc.geoLng, status: 'available',
+    address: loc.address,
   });
   const credentials = await provisionUser(str(b, 'email', { max: 200 }), 'driver', name, created.id);
   res.status(201).json({ driver: { id: created.id, name }, credentials });
@@ -687,7 +688,7 @@ function optionalNumber(value: unknown): number | null {
   return n;
 }
 
-type LocationPoint = { lat: number; lng: number; address: string | null; geoLat: number; geoLng: number };
+type LocationPoint = { gridLat: number; gridLng: number; address: string | null; geoLat: number; geoLng: number };
 
 /**
  * Resolve a location from a request body, accepting EITHER a real Nominatim
@@ -700,26 +701,41 @@ function locationPoint(b: Record<string, unknown>, latKey: string, lngKey: strin
   const geoLng = optionalNumber(b[geoLngKey]);
   const gridLat = optionalNumber(b[latKey]);
   const gridLng = optionalNumber(b[lngKey]);
-  const address = str(b, addressKey, { optional: true, max: 300 }) || null;
+  // Coordinate-only clients are valid (the map picker can provide a pin
+  // without a reverse-geocoded street label). Keep a readable fallback so
+  // downstream order validation still has a destination description.
+  const suppliedAddress = str(b, addressKey, { optional: true, max: 300 }) || null;
+
+  if ((geoLat === null) !== (geoLng === null)) throw badRequest('Both geographic coordinates are required');
+  if ((gridLat === null) !== (gridLng === null)) throw badRequest('Both grid coordinates are required');
 
   if (geoLat !== null && geoLng !== null) {
-    if (geoLat < -90 || geoLat > 90 || geoLng < -180 || geoLng > 180) throw badRequest('Invalid geographic coordinates');
+    if (!isWithinSingapore({ lat: geoLat, lon: geoLng })) throw badRequest('The selected location must be within Singapore');
     const g = geoToGrid(geoLat, geoLng);
-    return { lat: g.x, lng: g.y, address, geoLat, geoLng };
+    return { gridLat: g.x, gridLng: g.y, address: suppliedAddress || `Pinned location (${geoLat.toFixed(6)}, ${geoLng.toFixed(6)})`, geoLat, geoLng };
   }
   if (gridLat !== null && gridLng !== null) {
+    // The browser's current location pickers historically posted real
+    // coordinates in the plain Lat/Lng fields. Accept that shape while
+    // retaining support for legacy grid-cell clients.
+    if (gridLat >= 1.22 && gridLat <= 1.48 && gridLng >= 103.60 && gridLng <= 104.05) {
+      const geoLat = gridLat;
+      const geoLng = gridLng;
+      const g = geoToGrid(geoLat, geoLng);
+      return { gridLat: g.x, gridLng: g.y, address: suppliedAddress || `Pinned location (${geoLat.toFixed(6)}, ${geoLng.toFixed(6)})`, geoLat, geoLng };
+    }
     const max = config.grid.size;
     if (gridLat < 0 || gridLat > max || gridLng < 0 || gridLng > max) throw badRequest(`Coordinates must be within 0..${max}`);
     const geo = gridToGeo(gridLat, gridLng);
-    return { lat: gridLat, lng: gridLng, address, geoLat: geo.lat, geoLng: geo.lon };
+    return { gridLat, gridLng, address: suppliedAddress || `Pinned location (${geo.lat.toFixed(6)}, ${geo.lon.toFixed(6)})`, geoLat: geo.lat, geoLng: geo.lon };
   }
   throw badRequest(`A location is required for ${addressKey} (a real address or grid coordinates)`);
 }
 
-function deliveryPoint(b: Record<string, unknown>, store: { pickup_lat: number; pickup_lng: number }): LocationPoint {
+function deliveryPoint(b: Record<string, unknown>, store: { latitude: number; longitude: number }): LocationPoint {
   const point = locationPoint(b, 'deliveryLat', 'deliveryLng', 'deliveryAddress', 'deliveryGeoLat', 'deliveryGeoLng');
-  const { lat, lng } = point;
-  if (Math.abs(lat - store.pickup_lat) < 1 && Math.abs(lng - store.pickup_lng) < 1) {
+  const pickup = geoToGrid(store.latitude, store.longitude);
+  if (Math.abs(point.gridLat - pickup.x) < 1 && Math.abs(point.gridLng - pickup.y) < 1) {
     throw badRequest(`The delivery address is at the pickup location — choose a destination away from the store.`);
   }
   return point;

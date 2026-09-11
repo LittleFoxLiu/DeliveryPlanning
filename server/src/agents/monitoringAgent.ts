@@ -1,4 +1,4 @@
-import { deliveries, orders, drivers, roads, routes, type DeliveryRow, type OrderRow } from '../repo.js';
+import { deliveries, orders, drivers, routes, stores, type DeliveryRow, type OrderRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
 import { calculateGeoRoute, estimateGeoDelivery } from '../engine/geoRouting.js';
 import { distanceKm, type GeoPoint } from '../geo.js';
@@ -15,8 +15,9 @@ export const monitoringTools = {
   },
   get_order_status: async (orderId: string) => (await orders.byId(orderId))?.status,
   get_current_route: (deliveryId: string) => routes.activeForDelivery(deliveryId),
-  /** `projected` = grid ETA now, `baseline` = ideal free-flow grid ETA. The gap
-   *  is the traffic/detour penalty the driver is currently carrying. */
+  /** Compare the current OSRM projection with its baseline. Keeping this as a
+   *  small pure helper makes deadline risk detectable even when no traffic
+   *  provider is configured. */
   detect_delay: (delivery: DeliveryRow, projected: { totalMinutes: number; baselineMinutes: number }, order: OrderRow) => {
     const deadlineMs = Date.parse(order.deadline_ts);
     const projectedDoneMs = Date.now() + (Number.isFinite(projected.totalMinutes) ? projected.totalMinutes * 60_000 : 9e12);
@@ -43,10 +44,10 @@ export const monitoringTools = {
   estimate_new_eta: async (pos: GeoPoint, pickup: GeoPoint, dropoff: GeoPoint, phase: 'to_pickup' | 'to_dropoff') => {
     if (phase === 'to_dropoff') {
       const r = await calculateGeoRoute(pos, dropoff);
-      return { totalMinutes: r.etaMinutes, reachable: r.reachable };
+      return { totalMinutes: r.etaMinutes, baselineMinutes: r.etaMinutes, reachable: r.reachable };
     }
     const e = await estimateGeoDelivery(pos, pickup, dropoff);
-    return { totalMinutes: e.totalMinutes, reachable: e.reachable };
+    return { totalMinutes: e.totalMinutes, baselineMinutes: e.totalMinutes, reachable: e.reachable };
   },
   /** Raise a remediation request for the Coordinator to act on. The Monitoring
    *  Agent detects and recommends; it never mutates the assignment itself. */
@@ -117,7 +118,7 @@ export const monitoringAgent = {
       const newEta = await monitoringTools.estimate_new_eta(
         pos, { lat: store.latitude, lon: store.longitude }, dropoff, phase,
       );
-      const delay = monitoringTools.detect_delay(delivery, newEta.totalMinutes, order);
+      const delay = monitoringTools.detect_delay(delivery, newEta, order);
 
       const route = await monitoringTools.get_current_route(delivery.id);
       const rp = route?.path_json ?? {};

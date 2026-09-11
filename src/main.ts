@@ -11,6 +11,12 @@ import { searchNominatim } from './geoMap';
 const app = document.querySelector<HTMLDivElement>('#app')!;
 let pollTimer: number | undefined;
 
+function dropKeptNodes(): void {
+  app.querySelectorAll<HTMLElement>('[data-keep]').forEach((node) => {
+    document.dispatchEvent(new CustomEvent('dp:keep-dropped', { detail: node }));
+  });
+}
+
 export function stopPolling(): void {
   if (pollTimer !== undefined) { window.clearInterval(pollTimer); pollTimer = undefined; }
 }
@@ -174,7 +180,18 @@ function onboardingView(): void {
   const form = app.querySelector<HTMLFormElement>('#onboarding-form')!; const fields = app.querySelector('#role-fields')!;
   const draw = () => { const role = (form.elements.namedItem('role') as HTMLSelectElement).value; fields.innerHTML = role === 'merchant' ? '<label>Business name<input name="businessName" required></label><label>Store name<input name="storeName" required></label><label>Store address<input name="storeAddress" data-address-search required placeholder="Search with Nominatim"></label><input name="storeLat" type="hidden"><input name="storeLng" type="hidden">' : role === 'driver' ? '<label>Vehicle<select name="vehicleType"><option>car</option><option>bike</option><option>van</option><option>truck</option></select></label><label>Capacity<input name="capacity" type="number" min="1" max="20" value="4" required></label><label>Starting address<input name="address" data-address-search required placeholder="Search with Nominatim"></label><input name="lat" type="hidden"><input name="lng" type="hidden">' : '<p class="muted">You can join organizations later from your workspace.</p>'; wireAddressFields(fields); };
   (form.elements.namedItem('role') as HTMLSelectElement).addEventListener('change', draw); draw();
-  form.addEventListener('submit', async (e) => { e.preventDefault(); const fd = new FormData(form); const body: Record<string, unknown> = {}; fd.forEach((v, k) => { body[k] = v; }); body.capacity = Number(body.capacity); ['lat','lng','storeLat','storeLng'].forEach((k) => { if (body[k] !== undefined) body[k] = Number(body[k]); }); try { const r = await post<{ token: string; user: User }>('/onboarding/role', body); setSession(r.token, r.user); route(); } catch (err) { toast(err instanceof ApiError ? err.message : 'Setup failed', 'error'); } });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form); const body: Record<string, unknown> = {};
+    fd.forEach((v, k) => { body[k] = v; });
+    if (body.capacity !== undefined && body.capacity !== '') body.capacity = Number(body.capacity);
+    ['lat', 'lng', 'storeLat', 'storeLng'].forEach((k) => {
+      if (body[k] === undefined || body[k] === '') delete body[k];
+      else body[k] = Number(body[k]);
+    });
+    try { const r = await post<{ token: string; user: User }>('/onboarding/role', body); setSession(r.token, r.user); route(); }
+    catch (err) { toast(err instanceof ApiError ? err.message : 'Setup failed', 'error'); }
+  });
 }
 
 function wireAddressFields(container: Element): void {
@@ -237,6 +254,10 @@ export function goto(page: string): void {
 
 function shell(user: User, page: string): HTMLElement {
   const pages = NAV[user.role] || [];
+  // `data-keep` nodes own external resources such as Leaflet instances. The
+  // normal view patcher can notify their owners, but a full shell replacement
+  // (navigation/login) otherwise removes them silently and leaks the map.
+  dropKeptNodes();
   app.innerHTML = `
     <div class="shell">
       <header class="topbar">
@@ -260,7 +281,7 @@ function roleTitle(role: string): string {
 function route(): void {
   stopPolling();
   const user = getUser();
-  if (!user || !getToken()) { loginView(); return; }
+  if (!user || !getToken()) { dropKeptNodes(); loginView(); return; }
   const page = currentPage(user.role);
   const want = `#/${user.role}/${page}`;
   if (location.hash !== want) { history.replaceState(null, '', location.pathname + location.search + want); }

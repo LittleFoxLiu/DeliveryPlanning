@@ -99,6 +99,9 @@ export const config = {
     redirectUri: process.env.GOOGLE_REDIRECT_URI?.trim() || 'http://localhost:8787/api/auth/google/callback',
   },
   tokenTtlSeconds: 60 * 60 * 12,
+  // Retained for compatibility with legacy grid-coordinate requests. Stored
+  // locations and all routing still use real geographic coordinates.
+  grid: { size: 20 },
   // Monitoring loop cadence. 0 disables the background loop (tests / manual mode).
   monitorIntervalMs: Number(process.env.MONITOR_INTERVAL_MS ?? 0),
   routingUrl: (process.env.ROUTING_URL?.trim() || 'https://router.project-osrm.org/route/v1/driving').replace(/\/$/, ''),

@@ -146,8 +146,12 @@ export function scoreDriver(
   }
 
   // --- scoring (only for eligible drivers), each sub-score in [0, 1] ---
-  // eta: 0 min -> full marks; 90 min -> 0
-  const etaScore = clamp(1 - totalDeliveryMin / 90, 0, 1);
+  // ETA weight is the driver's arrival time at the merchant. The customer leg
+  // remains part of deadline feasibility; using the full trip here can make a
+  // nearby driver lose solely because its destination is farther away.
+  // Pickup responsiveness is the primary ETA concern, so keep this scale
+  // sensitive to the practical urban delivery window.
+  const etaScore = clamp(1 - (estimate.reachable ? estimate.toPickup.etaMinutes : Infinity) / 60, 0, 1);
   const efficiencyScore = routeEfficiencyPct / 100;
   // deadline: >=45 min slack -> full; 0 slack -> 0.35
   const deadlineScore = clamp(0.35 + (deadlineSlackMin / 45) * 0.65, 0, 1);

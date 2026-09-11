@@ -55,7 +55,7 @@ function view(active: DriverDelivery[], all: DriverDelivery[], me: Me): string {
     || (me.location ? `${me.location.lat.toFixed(6)}, ${me.location.lon.toFixed(6)}` : 'Current location unavailable');
   const mapCard = (selectable: boolean) => `<div class="card">
     <div class="card-head"><h2>${selectable ? 'Your position' : 'Your route'}</h2><span class="muted">you are the teal dot</span></div>
-    ${selectable ? `<div id="driver-position-map" class="geo-map" data-driver-location="${me.location ? `${me.location.lat},${me.location.lon}` : ''}"></div><p class="muted geo-help">Click anywhere on the map to set your current position.</p>` : `<div id="driver-route-map" class="geo-map"></div>${!geoPoints.length ? '<p class="muted">Geo route data is not available for this delivery yet.</p>' : ''}`}
+    ${selectable ? `<div id="driver-position-map" data-keep="driver-position-map" class="geo-map" data-driver-location="${me.location ? `${me.location.lat},${me.location.lon}` : ''}"></div><p class="muted geo-help">Click anywhere on the map to set your current position.</p>` : `<div id="driver-route-map" data-keep="driver-route-map" class="geo-map"></div>${!geoPoints.length ? '<p class="muted">Geo route data is not available for this delivery yet.</p>' : ''}`}
   </div>`;
 
   if (currentPage === 'account') {

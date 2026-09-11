@@ -249,6 +249,10 @@ function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   el.querySelectorAll<HTMLButtonElement>('[data-join]').forEach((b) => b.addEventListener('click', () => act(() => post(`/admin/membership/${b.dataset.join}`, { accept: b.dataset.accept === 'true' }), 'Request updated')));
 
   el.querySelector('[data-act="clear-created"]')?.addEventListener('click', () => { created = []; repaint(); });
+  const formNumber = (fd: FormData, key: string): number | undefined => {
+    const value = String(fd.get(key) ?? '').trim();
+    return value ? Number(value) : undefined;
+  };
   const addForm = (id: string, path: string, kind: string, body: (fd: FormData) => Record<string, unknown>) => {
     el.querySelector<HTMLFormElement>(`#${id}`)?.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -264,12 +268,12 @@ function wire(el: HTMLElement, ov: Overview, membership: Membership): void {
   };
   addForm('add-merchant', '/admin/merchants', 'Merchant', (fd) => ({
     businessName: fd.get('businessName'), storeName: fd.get('storeName'),
-    storeAddress: fd.get('storeAddress'), storeLat: Number(fd.get('storeLat')), storeLng: Number(fd.get('storeLng')),
+    storeAddress: fd.get('storeAddress'), storeLat: formNumber(fd, 'storeLat'), storeLng: formNumber(fd, 'storeLng'),
     contactName: fd.get('contactName'), email: fd.get('email'),
   }));
   addForm('add-driver', '/admin/drivers', 'Driver', (fd) => ({
-    name: fd.get('name'), vehicleType: fd.get('vehicleType'), capacity: Number(fd.get('capacity')),
-    maxPackageSize: fd.get('maxPackageSize'), lat: Number(fd.get('lat')), lng: Number(fd.get('lng')), address: fd.get('address'),
+    name: fd.get('name'), vehicleType: fd.get('vehicleType'), capacity: formNumber(fd, 'capacity'),
+    maxPackageSize: fd.get('maxPackageSize'), lat: formNumber(fd, 'lat'), lng: formNumber(fd, 'lng'), address: fd.get('address'),
     email: fd.get('email'),
   }));
   addForm('add-customer', '/admin/customers', 'Customer', (fd) => ({ name: fd.get('name'), email: fd.get('email') }));

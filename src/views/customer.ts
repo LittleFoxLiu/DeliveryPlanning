@@ -3,7 +3,7 @@ import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../mai
 import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
 import type { GeoPoint as StoredGeoPoint, ProductDto } from '../types';
-import { mountLocationMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
+import { mountLocationMap, mountRouteMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
 import { gridToGeo, geoToGrid, routeFromHere } from '../geo';
 
 interface Tracking {
@@ -171,7 +171,7 @@ function stepDelivery(): string {
       <label class="full">Delivery address<input id="delivery-search" placeholder="Type an address or search with Nominatim" autocomplete="off" value="${esc(deliveryGeo?.address || deliveryGeo?.name || deliveryAddress)}"></label>
       <button type="button" class="btn full" data-open-location-picker>Open map in a new window</button>
       <div id="delivery-results" class="geo-results full"></div>
-      <div id="delivery-map" class="geo-map full"></div>
+      <div id="delivery-map" data-keep="customer-delivery-map" class="geo-map full"></div>
       <p class="muted full geo-help">Click the map to drop your delivery pin. ${deliveryGeo ? `Selected: <strong>${esc(deliveryGeo.address || deliveryGeo.name || 'Singapore location')}</strong>` : 'No pin selected yet.'}</p>
       <input name="deliveryLat" type="hidden" value="${deliveryGeo?.lat ?? ''}">
       <input name="deliveryLng" type="hidden" value="${deliveryGeo?.lon ?? ''}">
@@ -225,7 +225,7 @@ function wire(el: HTMLElement): void {
     if (lastTracking.order.pickup?.lat != null && lastTracking.order.pickup.lon != null) points.push({ lat: lastTracking.order.pickup.lat, lon: lastTracking.order.pickup.lon, kind: 'Pickup', name: 'Merchant pickup', address: lastTracking.order.pickup.address });
     if (lastTracking.delivery?.driverPosition) points.push({ lat: lastTracking.delivery.driverPosition.lat, lon: lastTracking.delivery.driverPosition.lon, kind: 'Driver', name: 'Your driver' });
     const path = [...(lastTracking.delivery?.route?.path.toPickup ?? []), ...(lastTracking.delivery?.route?.path.toDropoff ?? [])];
-    import('../geoMap').then(({ mountRouteMap }) => mountRouteMap(liveMap, points, path.length > 1 ? [path.map((p) => [p.lat, p.lon] as [number, number])] : []));
+    mountRouteMap(liveMap, points, path.length > 1 ? [path.map((p) => [p.lat, p.lon] as [number, number])] : []);
   }
   el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; repaint(el); }));
 
