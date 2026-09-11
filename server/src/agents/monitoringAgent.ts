@@ -1,4 +1,4 @@
-import { deliveries, orders, drivers, roads, routes, type DeliveryRow, type OrderRow } from '../repo.js';
+import { deliveries, orders, drivers, stores, routes, type DeliveryRow, type OrderRow } from '../repo.js';
 import { emitAgentEvent } from '../events.js';
 import { calculateGeoRoute, estimateGeoDelivery } from '../engine/geoRouting.js';
 import { distanceKm, type GeoPoint } from '../geo.js';
@@ -15,15 +15,13 @@ export const monitoringTools = {
   },
   get_order_status: async (orderId: string) => (await orders.byId(orderId))?.status,
   get_current_route: (deliveryId: string) => routes.activeForDelivery(deliveryId),
-  /** `projected` = grid ETA now, `baseline` = ideal free-flow grid ETA. The gap
-   *  is the traffic/detour penalty the driver is currently carrying. */
-  detect_delay: (delivery: DeliveryRow, projected: { totalMinutes: number; baselineMinutes: number }, order: OrderRow) => {
+  /** Compares a fresh OSRM re-estimate against the ETA committed to at
+   *  assignment time — a growing gap means the driver is slipping. */
+  detect_delay: (delivery: DeliveryRow, projectedTotalMin: number, order: OrderRow) => {
     const deadlineMs = Date.parse(order.deadline_ts);
-    const projectedDoneMs = Date.now() + (Number.isFinite(projected.totalMinutes) ? projected.totalMinutes * 60_000 : 9e12);
-    const slipMin = Number.isFinite(projected.totalMinutes)
-      ? Math.round(projected.totalMinutes - projected.baselineMinutes)
-      : 9999;
-    void delivery;
+    const projectedDoneMs = Date.now() + (Number.isFinite(projectedTotalMin) ? projectedTotalMin * 60_000 : 9e12);
+    const originalEta = delivery.estimated_delivery_minutes ?? projectedTotalMin;
+    const slipMin = Number.isFinite(projectedTotalMin) ? Math.round(projectedTotalMin - originalEta) : 9999;
     return {
       delayed: slipMin >= DELAY_THRESHOLD_MIN || projectedDoneMs > deadlineMs,
       slipMin,

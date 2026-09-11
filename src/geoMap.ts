@@ -68,7 +68,7 @@ function liveMap(container: HTMLElement, opts?: L.MapOptions): LiveMap {
     return existing;
   }
   existing?.map.remove();
-  const map = L.map(container, { maxBounds: bounds, minZoom: 11, maxZoom: 19, ...opts });
+  const map = L.map(container, { maxBounds: singaporeBounds, minZoom: 11, maxZoom: 19, ...opts });
   L.tileLayer(TILE_URL, TILE_OPTS).addTo(map);
   const overlay = L.layerGroup().addTo(map);
   const entry: LiveMap = { map, overlay, fitted: false };
