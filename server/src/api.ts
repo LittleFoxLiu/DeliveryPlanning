@@ -59,7 +59,7 @@ api.post('/auth/signup', authLimiter, h(async (req, res) => {
   } else if (role === 'customer') {
     refId = (await customers.create(name)).id;
   } else {
-    const loc = locationPoint(b, 'lat', 'lng', 'address');
+    const loc = locationPoint(b, 'lat', 'lng', 'address', 'geoLat', 'geoLng');
     const created = await drivers.create({
       name,
       vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
@@ -149,7 +149,7 @@ api.post('/onboarding/role', authenticate(true), authLimiter, h(async (req, res)
     await stores.create({ merchantId: merchant.id, name: str(b, 'storeName', { min: 1, max: 120 }), latitude: location.geoLat, longitude: location.geoLng, address: location.address || '' });
     refId = merchant.id;
   } else if (role === 'driver') {
-    const loc = locationPoint(b, 'lat', 'lng', 'address');
+    const loc = locationPoint(b, 'lat', 'lng', 'address', 'geoLat', 'geoLng');
     const driver = await drivers.create({
       name: current.name, vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
       capacity: int(b, 'capacity', { min: 1, max: 20, fallback: 4 }), maxPackageSize: enumVal(b, 'maxPackageSize', ['small', 'medium', 'large'] as const, 'large'),
@@ -502,7 +502,7 @@ async function provisionUser(email: string, role: 'merchant' | 'driver' | 'custo
 api.post('/admin/merchants', ...adminOnly, h(async (req, res) => {
   const b = asObject(req.body);
   const merchant = await merchants.create(str(b, 'businessName', { min: 1, max: 120 }));
-  const loc = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress');
+  const loc = locationPoint(b, 'storeLat', 'storeLng', 'storeAddress', 'storeGeoLat', 'storeGeoLng');
   const store = await stores.create({
     merchantId: merchant.id,
     name: str(b, 'storeName', { min: 1, max: 120 }),
@@ -521,7 +521,7 @@ api.post('/admin/merchants', ...adminOnly, h(async (req, res) => {
 api.post('/admin/drivers', ...adminOnly, h(async (req, res) => {
   const b = asObject(req.body);
   const name = str(b, 'name', { min: 1, max: 120 });
-  const loc = locationPoint(b, 'lat', 'lng', 'address');
+  const loc = locationPoint(b, 'lat', 'lng', 'address', 'geoLat', 'geoLng');
   const created = await drivers.create({
     name,
     vehicleType: enumVal(b, 'vehicleType', ['bike', 'car', 'van', 'truck'] as const, 'car'),
@@ -591,7 +591,9 @@ api.get('/admin/runs/:id', ...adminOnly, h(async (req, res) => {
 }));
 
 api.get('/admin/escalations', ...adminOnly, h(async (req, res) => {
-  const status = ['pending', 'approved', 'rejected'].includes(String(req.query.status)) ? req.query.status as 'pending' : undefined;
+  const requestedStatus = String(req.query.status);
+  const status = requestedStatus === 'pending' || requestedStatus === 'approved' || requestedStatus === 'rejected'
+    ? requestedStatus : undefined;
   res.json({ escalations: await listEscalations(status) });
 }));
 
@@ -677,16 +679,6 @@ api.post('/sim/reset', ...simOnly, h(async (_req, res) => {
   await seed({ reset: true });
   res.json({ ok: true });
 }));
-
-/* --------------------------------------------------------------- helpers */
-type LocationPoint = { lat: number; lon: number; address: string };
-
-/** Resolve a Nominatim-geocoded Singapore coordinate + address from a request body. */
-function locationPoint(b: Record<string, unknown>, latKey: string, lonKey: string, addressKey: string): LocationPoint {
-  const point = singaporePoint(b, latKey, lonKey);
-  const address = str(b, addressKey, { optional: true, max: 300 }) || 'Selected Singapore location';
-  return { ...point, address };
-}
 
 /** Validate a delivery destination against the store's pickup point so the
  *  order can't be dispatched as a zero-distance no-op. */

@@ -61,7 +61,7 @@ const TILE_OPTS: L.TileLayerOptions = { attribution: '&copy; OpenStreetMap contr
 
 interface LiveMap {
   map: L.Map; overlay: L.LayerGroup; fitted: boolean;
-  onSelect?: (p: GeoPoint) => void; clickBound?: boolean;
+  clickHandler?: (event: L.LeafletMouseEvent) => void;
 }
 /** One persistent Leaflet instance per DOM node — survives view re-renders. */
 const LIVE = new WeakMap<HTMLElement, LiveMap>();
@@ -237,7 +237,7 @@ export function openLocationPicker(initial: GeoPoint | null, onSelect: (point: G
 
 /** Click-to-pick location map. Idempotent — keeps the instance (and the user's
  *  pan) across re-renders while re-binding the current callback / marker. */
-export function mountLocationMap(container: HTMLElement, initial: GeoPoint | null, onSelect: (point: GeoPoint) => void, route: GeoRoute | null = null): void {
+export function mountLocationMap(container: HTMLElement, initial: GeoPoint | null, onSelect: (point: GeoPoint) => void, route: GeoRoute | null = null): () => void {
   const safeInitial = initial && inSingapore(initial) ? initial : null;
   const entry = liveMap(container, { center: safeInitial ? [safeInitial.lat, safeInitial.lon] : [1.295, 103.855], zoom: 13 });
   const map = entry.map;
@@ -274,11 +274,11 @@ export function mountLocationMap(container: HTMLElement, initial: GeoPoint | nul
   return () => destroy(container);
 }
 
-export function mountOverviewMap(container: HTMLElement, points: Array<GeoPoint & { kind: string; detail?: string }>, paths: Array<[number, number][]> = []): () => void {
+export function mountOverviewMap(container: HTMLElement, points: Array<GeoPoint & { kind: string; detail?: string }>, roads: RoadInfo[] = []): () => void {
   const scopedPoints = points.filter(inSingapore);
   const user = scopedPoints.find((point) => point.kind === 'Driver');
   const entry = liveMap(container, { center: user ? [user.lat, user.lon] : [1.295, 103.855], zoom: user ? 14 : 13 });
-  drawOverlay(entry, scopedPoints as MarkerPoint[], paths, 15);
+  drawOverlay(entry, scopedPoints as MarkerPoint[], roads, 15);
   return () => destroy(container);
 }
 
@@ -287,11 +287,11 @@ export function mountOverviewMap(container: HTMLElement, points: Array<GeoPoint 
 export function mountRouteMap(
   container: HTMLElement,
   points: MarkerPoint[],
-  paths: Array<[number, number][]>,
+  roads: RoadInfo[],
 ): () => void {
   const scopedPoints = points.filter(inSingapore);
   const driver = scopedPoints.find((point) => point.kind === 'Driver');
   const entry = liveMap(container, { center: driver ? [driver.lat, driver.lon] : [1.3521, 103.8198], zoom: driver ? 14 : 12 });
-  drawOverlay(entry, scopedPoints, paths, 15);
+  drawOverlay(entry, scopedPoints, roads, 15);
   return () => destroy(container);
 }

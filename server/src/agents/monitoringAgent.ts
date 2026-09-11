@@ -11,7 +11,7 @@ const DEVIATION_THRESHOLD_KM = 1.5; // distance from the planned OSRM geometry
 export const monitoringTools = {
   get_driver_position: async (driverId: string) => {
     const d = await drivers.byId(driverId);
-    return d && d.latitude != null ? { lat: d.latitude, lon: d.longitude as number, at: d.location_at } : undefined;
+    return d && d.latitude != null && d.longitude != null ? { lat: d.latitude, lon: d.longitude, at: d.location_at } : undefined;
   },
   get_order_status: async (orderId: string) => (await orders.byId(orderId))?.status,
   get_current_route: (deliveryId: string) => routes.activeForDelivery(deliveryId),
@@ -19,6 +19,7 @@ export const monitoringTools = {
    *  small pure helper makes deadline risk detectable even when no traffic
    *  provider is configured. */
   detect_delay: (delivery: DeliveryRow, projected: { totalMinutes: number; baselineMinutes: number }, order: OrderRow) => {
+    const projectedTotalMin = projected.totalMinutes;
     const deadlineMs = Date.parse(order.deadline_ts);
     const projectedDoneMs = Date.now() + (Number.isFinite(projectedTotalMin) ? projectedTotalMin * 60_000 : 9e12);
     const originalEta = delivery.estimated_delivery_minutes ?? projectedTotalMin;
@@ -88,7 +89,7 @@ export const monitoringAgent = {
       const order = await orders.byId(delivery.order_id);
       if (!order || !delivery.driver_id) continue;
       const driver = await drivers.byId(delivery.driver_id);
-      const pos = driver && driver.latitude != null ? { lat: driver.latitude, lon: driver.longitude as number } : null;
+      const pos = driver && driver.latitude != null && driver.longitude != null ? { lat: driver.latitude, lon: driver.longitude } : null;
       const phase: Finding['phase'] = ['picked_up', 'en_route_drop'].includes(delivery.status) ? 'to_dropoff' : 'to_pickup';
       const issues: string[] = [];
       let trigger: Trigger = 'none';

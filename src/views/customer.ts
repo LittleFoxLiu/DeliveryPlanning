@@ -3,8 +3,8 @@ import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../mai
 import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
 import type { GeoPoint as StoredGeoPoint, ProductDto } from '../types';
-import { mountLocationMap, mountRouteMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
-import { gridToGeo, geoToGrid, routeFromHere } from '../geo';
+import { mountLocationMap, mountRouteMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute, type RoadInfo } from '../geoMap';
+import { routeFromHere } from '../geo';
 
 interface Tracking {
   order: { id: string; status: string; priority: string; deadlineTs: string; pickup?: StoredGeoPoint & { address?: string; name?: string }; dropoff: StoredGeoPoint & { address?: string }; items: { name: string; qty: number }[] };
@@ -267,8 +267,7 @@ function wire(el: HTMLElement): void {
     const points: Array<GeoPoint & { kind: string; name: string }> = [{ lat: lastTracking.order.dropoff.lat, lon: lastTracking.order.dropoff.lon, kind: 'Drop-off', name: 'Delivery address', address: lastTracking.order.dropoff.address }];
     if (lastTracking.order.pickup?.lat != null && lastTracking.order.pickup.lon != null) points.push({ lat: lastTracking.order.pickup.lat, lon: lastTracking.order.pickup.lon, kind: 'Pickup', name: 'Merchant pickup', address: lastTracking.order.pickup.address });
     if (lastTracking.delivery?.driverPosition) points.push({ lat: lastTracking.delivery.driverPosition.lat, lon: lastTracking.delivery.driverPosition.lon, kind: 'Driver', name: 'Your driver' });
-    const path = [...(lastTracking.delivery?.route?.path.toPickup ?? []), ...(lastTracking.delivery?.route?.path.toDropoff ?? [])];
-    mountRouteMap(liveMap, points, path.length > 1 ? [path.map((p) => [p.lat, p.lon] as [number, number])] : []);
+    mountRouteMap(liveMap, points, buildCustomerRoads(lastTracking));
   }
   el.querySelectorAll<HTMLButtonElement>('[data-pick]').forEach((b) => b.addEventListener('click', () => { selected = b.dataset.pick!; refreshTracking(el); }));
 
