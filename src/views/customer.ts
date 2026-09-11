@@ -4,6 +4,7 @@ import { esc, toast, customerChip, fmtTime, minutesUntil, eventFeed, localDateti
 import { productGrid, cartSummary, cartCount, cartItems, cartTotalCents, wireCart, type Cart } from './shop';
 import type { GeoPoint as StoredGeoPoint, ProductDto } from '../types';
 import { mountLocationMap, openLocationPicker, routeWithOsrm, searchNominatim, type GeoPoint, type GeoRoute } from '../geoMap';
+import { gridToGeo, geoToGrid, routeFromHere } from '../geo';
 
 interface Tracking {
   order: { id: string; status: string; priority: string; deadlineTs: string; pickup?: StoredGeoPoint & { address?: string; name?: string }; dropoff: StoredGeoPoint & { address?: string }; items: { name: string; qty: number }[] };
@@ -112,7 +113,7 @@ function trackingCard(t: Tracking): string {
 }
 
 function mapFor(t: Tracking): string {
-  return '<div id="customer-live-map" class="geo-map"></div>';
+  return '<div id="customer-live-map" data-keep="customer-live-map" class="geo-map"></div>';
 }
 
 /* ------------------------------------------------------------------ wizard */

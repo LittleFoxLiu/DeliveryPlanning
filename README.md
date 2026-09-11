@@ -68,15 +68,25 @@ Other scripts: `npm test` (Vitest), `npm run typecheck`, `npm run build`,
 
 ### Vercel deployment
 
-The Vercel deployment exposes the Express API through `api/[...path].ts`.
-Configure `DATABASE_URL` (a persistent Postgres/Supabase connection string) and
-`AUTH_SECRET` (at least 16 characters) in the Vercel project environment. On a
-new empty database the API initialises the schema and creates the demo accounts
-automatically; it does not reset an existing database.
+The Vercel deployment exposes the Express API through `api/[...path].ts`, and
+`vercel.json` rewrites every non-API path to `index.html` so the SPA's own
+routes resolve.
 
-After redeploying, verify the API directly at `/api/health`. It should return
-JSON with `ok: true`; a Vercel HTML 404 there means the deployment is not using
-the repository root or has not deployed the `api/` function.
+Set in the Vercel project environment:
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | **yes** | Postgres/Supabase connection string — use the Direct or Session pooler (port 5432), not the transaction pooler (6543). Without it `/api/*` returns a `503 not_configured` explaining this. |
+| `AUTH_SECRET` | recommended | ≥16 chars. If unset the API still boots on a per-instance ephemeral secret (sessions won't survive a redeploy). |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | optional | Enables "Continue with Google". Without them that route returns `503`, not a 404. |
+| `LLM_GATEWAY_URL` / `LLM_GATEWAY_API_KEY` / `LLM_MODEL` | optional | LLM advisory layer; the app is fully deterministic without it. |
+
+On a new empty database the API initialises the schema and creates the demo
+accounts automatically; it never resets an existing database.
+
+After redeploying, verify the API at **`/api/health`** — it must return JSON
+(`ok: true`, or a `503` telling you which env var is missing). A Vercel **HTML
+404** there means the `api/` function did not deploy — check the build log.
 
 ---
 

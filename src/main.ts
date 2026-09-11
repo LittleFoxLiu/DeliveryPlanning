@@ -53,7 +53,24 @@ export function patchView(el: HTMLElement, html: string): boolean {
   el.querySelectorAll<Field>('[name]').forEach((f) => saved.set(fieldKey(f), f.value));
   const feedTop = el.querySelector('.event-feed')?.scrollTop ?? 0;
 
+  // Elements marked [data-keep="<id>"] (e.g. a live Leaflet map) are detached
+  // before the re-render and re-inserted in place of their new placeholder, so
+  // their JS state survives a poll — no flicker, no tile reload.
+  const kept = new Map<string, HTMLElement>();
+  el.querySelectorAll<HTMLElement>('[data-keep]').forEach((n) => {
+    const id = n.dataset.keep!;
+    if (id) { kept.set(id, n); n.remove(); }
+  });
+
   el.innerHTML = html;
+
+  kept.forEach((node, id) => {
+    const slot = el.querySelector<HTMLElement>(`[data-keep="${id}"]`);
+    if (slot) slot.replaceWith(node);
+    // the new markup no longer wants this node — let its owner tear down (Leaflet, …).
+    // The node is already detached, so notify via document (no bubbling path).
+    else document.dispatchEvent(new CustomEvent('dp:keep-dropped', { detail: node }));
+  });
 
   el.querySelectorAll<Field>('[name]').forEach((f) => {
     // Form fields here are never server-driven — always carry the user's input

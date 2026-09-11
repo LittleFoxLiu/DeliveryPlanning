@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { config } from './config.js';
 import { SCHEMA_SQL, TABLES } from './schema.js';
@@ -39,12 +39,34 @@ function normalizeRows<T>(rows: T[]): T[] {
   return rows;
 }
 
+const CORRUPTION_RE = /could not (create directory|open file)|database files are incompatible|File exists|is not a valid data directory|base\/\d+|PGlite failed to initialize|Cannot process startup packet|incorrect checksum|invalid page|unexpected data beyond EOF/i;
+
 async function makePglite(): Promise<Backend> {
   const { PGlite } = await import('@electric-sql/pglite');
-  const loc = config.dbFile === ':memory:' ? undefined : `file://${config.dbFile}`;
-  if (loc && config.dbFile !== ':memory:') mkdirSync(dirname(config.dbFile), { recursive: true });
-  const pg = new PGlite(loc);
-  await pg.waitReady;
+  const persistent = config.dbFile !== ':memory:';
+  const loc = persistent ? `file://${config.dbFile}` : undefined;
+  if (persistent) mkdirSync(dirname(config.dbFile), { recursive: true });
+
+  let pg: import('@electric-sql/pglite').PGlite;
+  try {
+    pg = new PGlite(loc);
+    await pg.waitReady;
+    await pg.query('SELECT 1');
+  } catch (err) {
+    // A persistent PGlite data directory can be left inconsistent by a crash,
+    // an interrupted process, or the folder being removed while the engine was
+    // running. It holds only local demo data, so wipe it and start fresh.
+    if (persistent && CORRUPTION_RE.test((err as Error).message)) {
+      console.warn(`[db] local PGlite data at ${config.dbFile} is corrupt — recreating it. (${(err as Error).message})`);
+      try { await pg!.close(); } catch { /* ignore */ }
+      rmSync(config.dbFile, { recursive: true, force: true });
+      mkdirSync(dirname(config.dbFile), { recursive: true });
+      pg = new PGlite(loc);
+      await pg.waitReady;
+    } else {
+      throw err;
+    }
+  }
 
   // PGlite is a single embedded engine — concurrent .query() calls race and can
   // corrupt its page cache. Serialise every DB operation through one promise

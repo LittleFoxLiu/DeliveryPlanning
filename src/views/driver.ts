@@ -2,6 +2,7 @@ import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, fmtTime, minutesUntil } from '../ui';
 import { mountLocationMap, mountRouteMap, type GeoPoint } from '../geoMap';
+import { gridToGeo, geoToGrid, routeFromHere } from '../geo';
 
 interface DriverDelivery {
   id: string; status: string; etaTs: string | null; estimatedDeliveryMinutes: number | null;

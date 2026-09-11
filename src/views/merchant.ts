@@ -4,6 +4,7 @@ import { poll, patchView, handleUnauthed, changed, resetSig, goto } from '../mai
 import { esc, toast, statusChip, fmtTime, minutesUntil, eventFeed, localDatetimeValue, money, agentDecisionCard, type PublicRun } from '../ui';
 import { productGrid, cartSummary, cartCount, cartItems, wireCart, type Cart } from './shop';
 import { mountRouteMap, searchNominatim, type GeoPoint } from '../geoMap';
+import { routeFromHere } from '../geo';
 
 interface MerchantOrders { orders: OrderDto[] }
 interface OrderDetail {
@@ -136,7 +137,7 @@ function detailBody(d: OrderDetail): string {
     <h3 style="margin-top:16px;font-size:13px">Agent trail</h3>
     ${eventFeed(d.events)}
     ${agentDecisionCard(d.run)}
-    <div id="merchant-route-map" class="geo-map" style="margin-top:16px"></div>`;
+    <div id="merchant-route-map" data-keep="merchant-route-map" class="geo-map" style="margin-top:16px"></div>`;
 }
 
 function newOrderCard(): string {

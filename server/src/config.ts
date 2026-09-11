@@ -53,13 +53,24 @@ function resolveLlm(): LlmConfig {
   return { enabled: false };
 }
 
+export const authSecretMissing = { value: false };
+
 function readSecret(): string {
   const fromEnv = process.env.AUTH_SECRET?.trim();
   if (fromEnv && fromEnv.length >= 16) return fromEnv;
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('AUTH_SECRET must be set (>=16 chars) in production');
-  }
   if (process.env.NODE_ENV === 'test') return 'test-secret-0123456789abcdef';
+
+  if (process.env.NODE_ENV === 'production') {
+    // A missing AUTH_SECRET must NOT crash the module at import time — that
+    // takes the whole deployment down (Vercel then serves a 404 for /api/*).
+    // Degrade instead: run on a generated per-instance secret and warn. Tokens
+    // won't survive a redeploy or span instances until AUTH_SECRET is set.
+    authSecretMissing.value = true;
+    console.error('[config] AUTH_SECRET is not set — using an ephemeral secret. '
+      + 'Set AUTH_SECRET (>=16 chars) in the deployment environment for stable sessions.');
+    return 'ephemeral-' + randomBytes(24).toString('hex');
+  }
+
   // Dev/demo: persist a secret to disk so tokens survive `tsx watch` restarts
   // (otherwise every server reload silently logs everyone out).
   const file = 'server/data/.dev-auth-secret';

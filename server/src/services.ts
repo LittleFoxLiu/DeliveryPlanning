@@ -52,7 +52,6 @@ export interface TickResult {
 export async function simulateTick(opts: { monitor?: boolean } = {}): Promise<TickResult> {
   const moved: TickResult['moved'] = [];
   const active = (await deliveries.active()).filter((d) => ['assigned', 'en_route_pickup', 'picked_up', 'en_route_drop'].includes(d.status));
-
   for (const delivery of active) {
     if (!delivery.driver_id) continue;
     const route = await routes.activeForDelivery(delivery.id);

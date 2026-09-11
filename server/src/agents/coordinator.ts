@@ -170,11 +170,16 @@ export const coordinator = {
 
     // Risk is judged on the PROPOSED recovery, not the current broken plan.
     // A reroute keeps the driver (LOW risk; its own logic escalates internally).
-    // A reassignment is judged on whether the alternative driver can deliver.
+    // A reassignment is judged on whether the alternative driver can deliver —
+    // EXCEPT when the current driver is gone (offline / abandoned): there is no
+    // "keep the driver" option, so any eligible alternative is strictly better
+    // than a stranded package. Only escalate when no alternative exists at all.
+    const driverGone = finding.issues.includes('driver_unavailable');
     const altSlack = alt ? alt.factors.deadlineSlackMin : null;
-    const proposedMissMin = advisory.strategy === 'reassign'
-      ? (altSlack == null ? 999 : (altSlack < 0 ? -altSlack : 0))
-      : 0;
+    const proposedMissMin = advisory.strategy !== 'reassign' ? 0
+      : altSlack == null ? 999
+        : driverGone ? 0
+          : altSlack < 0 ? -altSlack : 0;
     const ctx = {
       orderId: order.id, deliveryId: delivery.id, deadlineMissMin: proposedMissMin,
       reachable: advisory.strategy === 'reroute' ? (rerouteFeasible || reassignFeasible) : !!alt,

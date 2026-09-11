@@ -1,6 +1,7 @@
 import { q, q1, initDb, resetDb, closeDb } from './db.js';
 import { hashPassword } from './auth.js';
-import { users, merchants, stores, customers, drivers, orders, products } from './repo.js';
+import { users, merchants, stores, customers, drivers, orders, products, roads, traffic } from './repo.js';
+import { buildRoadGrid } from './engine/routing.js';
 import { minutesFromNow } from './util.js';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -39,6 +40,18 @@ function randomLocations(count: number): SeedLocation[] {
 export async function seed(opts: { reset?: boolean } = {}): Promise<void> {
   await initDb();
   if (opts.reset) await resetDb();
+
+  // The abstract road grid backs deterministic routing, the traffic simulator
+  // and the offline routing fallback. Idempotent — recreated on every boot so
+  // an older database that predates it still gets one.
+  const roadCount = await q1<{ n: number }>('SELECT COUNT(*)::int AS n FROM road_segments');
+  if ((roadCount?.n ?? 0) === 0) {
+    for (const s of buildRoadGrid()) {
+      const rid = s.ay === s.by ? `H-${s.ax}-${s.ay}` : `V-${s.ax}-${s.ay}`;
+      await q(`INSERT INTO road_segments (id, ax, ay, bx, by, status, delay_minutes) VALUES (?,?,?,?,?, 'clear', 0)
+               ON CONFLICT (id) DO NOTHING`, [rid, s.ax, s.ay, s.bx, s.by]);
+    }
+  }
 
   const existing = await q1<{ n: number }>('SELECT COUNT(*)::int AS n FROM users');
   if ((existing?.n ?? 0) > 0 && !opts.reset) {

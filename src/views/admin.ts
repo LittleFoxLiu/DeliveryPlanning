@@ -3,6 +3,7 @@ import { get, post, ApiError } from '../api';
 import { poll, patchView, handleUnauthed, changed, resetSig } from '../main';
 import { esc, toast, statusChip, eventFeed, fmtTime, minutesUntil } from '../ui';
 import { mountOverviewMap, searchNominatim } from '../geoMap';
+import { gridToGeo, routeFromHere } from '../geo';
 import { renderAdminOps } from './adminOps';
 import { renderAdminEval } from './adminEval';
 
@@ -87,7 +88,7 @@ function overviewPage(ov: Overview): string {
     <div class="grid2">
       <div class="card">
         <div class="card-head"><h2>Network map</h2><span class="muted">Real-world locations</span></div>
-        <div id="admin-overview-map" class="geo-map overview-map"></div>
+        <div id="admin-overview-map" data-keep="admin-overview-map" class="geo-map overview-map"></div>
       </div>
       <div class="card">
         <div class="card-head"><h2>Agent activity</h2><a class="muted" href="#/admin/orders">order details →</a></div>

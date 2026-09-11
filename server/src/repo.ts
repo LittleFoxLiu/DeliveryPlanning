@@ -170,6 +170,8 @@ export interface OrderItemInput { name: string; qty: number; productId?: string 
 export const orders = {
   async create(input: Omit<OrderRow, 'id' | 'status' | 'created_at' | 'ready_at'> & { items?: OrderItemInput[] }): Promise<OrderRow> {
     const oid = id('ord');
+    const dg = input.delivery_geo_lat == null || input.delivery_geo_lng == null
+      ? gridToGeo(input.delivery_lat, input.delivery_lng) : null;
     await tx(async () => {
       await q(`
         INSERT INTO orders (id, merchant_id, store_id, customer_id, pickup_latitude, pickup_longitude, delivery_latitude, delivery_longitude, delivery_address, status, priority, deadline_ts, package_size, volume, note)
